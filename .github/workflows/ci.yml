@@ -1,0 +1,21 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc }
+      - run: cd server && npm ci && npm run typecheck && npm test
+      - run: cd client && npm ci && npm run typecheck && npm run build
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r ml/requirements.txt && pip install -e ml
+      - run: ruff check ml
+      - run: pytest ml/tests -q
+      - run: python ml/scripts/make_mock_run.py --out results && python ml/scripts/validate_run.py results/*/

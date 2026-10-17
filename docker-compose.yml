@@ -1,0 +1,43 @@
+name: aquatesseract
+services:
+  db:
+    image: postgres:16.3-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aqua}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aqua}
+      POSTGRES_DB: ${POSTGRES_DB:-aquatesseract}
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aqua} -d ${POSTGRES_DB:-aquatesseract}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build: ./server
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://${POSTGRES_USER:-aqua}:${POSTGRES_PASSWORD:-aqua}@db:5432/${POSTGRES_DB:-aquatesseract}
+      RESULTS_DIR: /results
+      CORS_ORIGIN: http://localhost:${CLIENT_PORT:-5173}
+    ports: ["${SERVER_PORT:-4000}:4000"]
+    volumes:
+      - ./server:/app
+      - /app/node_modules
+      - ${RESULTS_DIR:-./results}:/results:ro
+
+  client:
+    build: ./client
+    depends_on: [server]
+    environment:
+      VITE_API_PROXY: http://server:4000
+    ports: ["${CLIENT_PORT:-5173}:5173"]
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+
+volumes:
+  pgdata:
