@@ -60,16 +60,39 @@ export default function LandingPage({ onEnterExplorer }: Props) {
       requestAnimationFrame(() => {
         const y = window.scrollY;
         const vh = window.innerHeight;
-        const sf = Math.max(0, y / vh);
-        const s = Math.min(Math.floor(sf), 4);
+        const viewportCenter = y + vh / 2;
+        const sectionCenters = sectionRefs.current.map((section) =>
+          section
+            ? section.getBoundingClientRect().top + y + section.offsetHeight / 2
+            : null,
+        );
+
+        let sf = 0;
+        for (let i = 0; i < sectionCenters.length - 1; i += 1) {
+          const currentCenter = sectionCenters[i];
+          const nextCenter = sectionCenters[i + 1];
+          if (currentCenter === null || nextCenter === null) continue;
+          if (viewportCenter >= currentCenter && viewportCenter < nextCenter) {
+            sf = i + (viewportCenter - currentCenter) / (nextCenter - currentCenter);
+            break;
+          }
+          if (viewportCenter >= nextCenter) sf = i + 1;
+        }
+
+        sf = Math.min(Math.max(sf, 0), SECTIONS.length - 1);
+        const s = Math.min(Math.floor(sf), SECTIONS.length - 1);
         const sp = Math.min(sf - s, 1);
         setScroll({ section: s, sectionProgress: sp, sectionFloat: sf });
         ticking = false;
       });
     };
     window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
     onScroll();
-    return () => window.removeEventListener('scroll', onScroll);
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+    };
   }, []);
 
   /* ── continuous telemetry data calculation ── */
@@ -176,38 +199,24 @@ export default function LandingPage({ onEnterExplorer }: Props) {
     (idx: number): React.CSSProperties => {
       const { sectionFloat: sf } = scroll;
       const diff = sf - idx;
+      const smoothstep = (start: number, end: number, value: number) => {
+        const t = Math.max(0, Math.min(1, (value - start) / (end - start)));
+        return t * t * (3 - 2 * t);
+      };
 
-      // When section is well outside viewport, hide safely
-      if (Math.abs(diff) > 1.35) {
-        return {
-          opacity: 0,
-          transform: diff < 0 ? 'scale(0.85)' : 'scale(1.18)',
-          pointerEvents: 'none',
-        };
-      }
-
-      // Smooth zoom:
-      // Approaching from above (diff < 0): scale smoothly 0.88 -> 1.0, opacity 0.3 -> 1.0
-      // Passing by (diff > 0): scale smoothly 1.0 -> 1.15, opacity 1.0 -> 0.1
-      let scale = 1.0;
-      let opacity = 1.0;
-
-      if (diff < 0) {
-        // Entering from depth
-        const progress = Math.max(0, 1 + diff); // 0 to 1
-        scale = 0.88 + progress * 0.12;
-        opacity = Math.max(0.15, Math.min(1, progress * 1.5));
-      } else {
-        // Diving past
-        scale = 1.0 + diff * 0.15;
-        opacity = Math.max(0, 1 - diff * 0.85);
-      }
+      // Keep each section readable as it enters and leaves the viewport. The
+      // fade follows scroll directly, with no CSS transition lag between frames.
+      const fadeIn = smoothstep(-0.9, -0.1, diff);
+      const fadeOut = 1 - smoothstep(0.1, 0.9, diff);
+      const opacity = Math.max(0.72, fadeIn * fadeOut);
+      const scale = diff < 0
+        ? 0.96 + smoothstep(-1, 0, diff) * 0.04
+        : 1 + Math.min(diff, 1) * 0.04;
 
       return {
         opacity,
         transform: `scale(${scale.toFixed(3)})`,
-        pointerEvents: opacity > 0.3 ? 'auto' : 'none',
-        transition: 'transform 0.12s ease-out, opacity 0.12s ease-out',
+        pointerEvents: 'auto',
         willChange: 'transform, opacity',
       };
     },
