@@ -17,7 +17,6 @@ interface ScrollState {
 
 interface TelemetryData {
   depth: number;
-  needleDeg: number;
   temp: string;
   o2: string;
   pressure: number;
@@ -107,10 +106,6 @@ export default function LandingPage({ onEnterExplorer }: Props) {
     else if (sf <= 3) depth = 2000 + (sf - 2) * 3500;
     else depth = Math.min(6000, 5500 + (sf - 3) * 500);
 
-    // Speedometer needle angle: sweeps from -125deg (0m) to +125deg (5500m+)
-    const norm = Math.min(Math.max(depth / 5500, 0), 1);
-    const needleDeg = -125 + norm * 250;
-
     // Temperature (18.3°C down to 1.2°C)
     let temp = 18.3;
     if (sf <= 1) temp = 18.3 - sf * (18.3 - 14.1);
@@ -167,7 +162,6 @@ export default function LandingPage({ onEnterExplorer }: Props) {
 
     return {
       depth: Math.round(depth),
-      needleDeg,
       temp: temp.toFixed(1),
       o2: o2.toFixed(1),
       pressure,
@@ -206,9 +200,9 @@ export default function LandingPage({ onEnterExplorer }: Props) {
 
       // Keep each section readable as it enters and leaves the viewport. The
       // fade follows scroll directly, with no CSS transition lag between frames.
-      const fadeIn = smoothstep(-0.9, -0.1, diff);
-      const fadeOut = 1 - smoothstep(0.1, 0.9, diff);
-      const opacity = Math.max(0.72, fadeIn * fadeOut);
+      const fadeIn = smoothstep(-0.45, 0.15, diff);
+      const fadeOut = 1 - smoothstep(0.55, 1.15, diff);
+      const opacity = fadeIn * fadeOut;
       const scale = diff < 0
         ? 0.96 + smoothstep(-1, 0, diff) * 0.04
         : 1 + Math.min(diff, 1) * 0.04;
@@ -247,7 +241,7 @@ export default function LandingPage({ onEnterExplorer }: Props) {
   );
 
   return (
-    <div className="landing-root">
+    <div className={`landing-root ${scroll.sectionFloat > 0.03 ? 'landing-root--scrolled' : 'landing-root--surface'}`}>
       {/* ════ FIXED BACKGROUND STACK ════ */}
       <div className="landing-bg">
         <div className="landing-bg__layer" style={{ opacity: layerOpacity(0), zIndex: 0 }}>
@@ -276,8 +270,8 @@ export default function LandingPage({ onEnterExplorer }: Props) {
                 left: `${p.left}%`,
                 '--delay': `${p.delay}s`,
                 '--duration': `${p.duration}s`,
-                '--size': `${p.size}px`,
-                '--p-opacity': p.opacity,
+                '--size': `${p.size + scroll.sectionFloat * 0.35}px`,
+                '--p-opacity': p.opacity * (1 + Math.min(scroll.sectionFloat, 4) * 0.16),
                 '--drift': p.drift,
               } as React.CSSProperties
             }
@@ -377,132 +371,32 @@ export default function LandingPage({ onEnterExplorer }: Props) {
         </div>
       </aside>
 
-      {/* ════ FIXED SPEEDOMETER DEPTH GAUGE (RIGHT SIDE) ════ */}
-      <aside className="fixed-speedometer" aria-label="Bathy-Speedometer Depth Gauge">
-        <div className="speedometer-box">
-          <svg className="speedometer-svg" viewBox="0 0 200 200">
-            <defs>
-              <linearGradient id="gaugeArcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#38bdf8" />
-                <stop offset="35%" stopColor="#00e5ff" />
-                <stop offset="70%" stopColor="#818cf8" />
-                <stop offset="100%" stopColor="#c084fc" />
-              </linearGradient>
-              <linearGradient id="needleGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="#ff3366" />
-                <stop offset="40%" stopColor="#00e5ff" />
-                <stop offset="100%" stopColor="#ffffff" />
-              </linearGradient>
-              <filter id="gaugeGlow" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="3" result="blur" />
-                <feComposite in="SourceGraphic" in2="blur" operator="over" />
-              </filter>
-            </defs>
-
-            {/* Gauge outer rim */}
-            <circle cx="100" cy="100" r="88" className="gauge-rim" />
-
-            {/* Inactive track arc (-125deg to +125deg) */}
-            <path
-              d="M 37.8 157.3 A 80 80 0 1 1 162.2 157.3"
-              fill="none"
-              stroke="rgba(255, 255, 255, 0.08)"
-              strokeWidth="5"
-              strokeLinecap="round"
-            />
-
-            {/* Active illuminated depth arc */}
-            <path
-              d="M 37.8 157.3 A 80 80 0 1 1 162.2 157.3"
-              fill="none"
-              stroke="url(#gaugeArcGrad)"
-              strokeWidth="5"
-              strokeDasharray="349"
-              strokeDashoffset={349 - (349 * Math.min(telemetry.depth / 5500, 1))}
-              strokeLinecap="round"
-              filter="url(#gaugeGlow)"
-              className="gauge-active-arc"
-            />
-
-            {/* Tick marks around speedometer */}
-            {Array.from({ length: 11 }).map((_, i) => {
-              const tickAngle = -125 + i * 25; // -125 to +125 deg
-              const rad = ((tickAngle - 90) * Math.PI) / 180;
-              const isMajor = i % 2 === 0;
-              const r1 = 80;
-              const r2 = isMajor ? 69 : 74;
-              const x1 = 100 + r1 * Math.cos(rad);
-              const y1 = 100 + r1 * Math.sin(rad);
-              const x2 = 100 + r2 * Math.cos(rad);
-              const y2 = 100 + r2 * Math.sin(rad);
-              const isPassed = tickAngle <= telemetry.needleDeg;
-              return (
-                <line
-                  key={i}
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={isPassed ? '#00e5ff' : 'rgba(255,255,255,0.22)'}
-                  strokeWidth={isMajor ? 2.2 : 1.2}
-                />
-              );
-            })}
-
-            {/* Depth label numbers on dial */}
-            <text x="36" y="174" className="dial-num">0</text>
-            <text x="26" y="92" className="dial-num">1k</text>
-            <text x="56" y="44" className="dial-num">2k</text>
-            <text x="144" y="44" className="dial-num">3k</text>
-            <text x="174" y="92" className="dial-num">4k</text>
-            <text x="156" y="174" className="dial-num">5.5k</text>
-
-            {/* ROTATING PIN / SPEEDOMETER NEEDLE */}
-            <g
-              className="speedometer-needle-group"
-              style={{
-                transform: `rotate(${telemetry.needleDeg}deg)`,
-                transformOrigin: '100px 100px',
-              }}
-            >
-              {/* Tapered glowing needle pointer */}
-              <polygon
-                points="97.5,108 102.5,108 101,30 99,30"
-                fill="url(#needleGrad)"
-                filter="url(#gaugeGlow)"
-              />
-              {/* Illuminated sharp needle pin tip */}
-              <circle cx="100" cy="28" r="2.5" fill="#00e5ff" filter="url(#gaugeGlow)" />
-              {/* Counterbalance tail */}
-              <polygon points="98,108 102,108 100.8,124 99.2,124" fill="#475569" />
-              {/* Center Hub */}
-              <circle cx="100" cy="100" r="10" fill="#0b172a" stroke="#00e5ff" strokeWidth="2" />
-              <circle cx="100" cy="100" r="4" fill="#ffffff" />
-            </g>
-          </svg>
-
-          {/* Speedometer Center Readout */}
-          <div className="speedometer-readout">
-            <div className="speedo-title">BATHYMETRY</div>
-            <div className="speedo-main-val">
-              <span>{telemetry.depth.toLocaleString()}</span>
-              <span className="speedo-unit">M</span>
-            </div>
-            <div className="speedo-sub-label">OCEAN DEPTH</div>
-          </div>
-
-          {/* Quick Jump Buttons */}
-          <div className="speedo-quick-jumps">
-            {SECTIONS.map((s) => (
-              <button
-                key={s.id}
-                className={`speedo-jump-btn ${scroll.section === s.id ? 'active' : ''}`}
-                onClick={() => scrollToSection(s.id)}
-                title={`Jump to ${s.label} (${s.depthStr})`}
+      {/* ════ FIXED DEPTH SCALE ════ */}
+      <aside className="fixed-speedometer" aria-label="Ocean depth scale from 0 to 6,000 meters">
+        <div className="depth-scale">
+          <div className="depth-scale__track" aria-hidden="true">
+            <div className="depth-scale__rail" />
+            {Array.from({ length: 31 }, (_, index) => index * 200).map((tick) => (
+              <div
+                key={tick}
+                className={`depth-scale__tick ${tick % 1000 === 0 ? 'depth-scale__tick--major' : ''}`}
+                style={{ top: `${(tick / 6000) * 100}%` }}
               >
-                {s.label[0]}
-              </button>
+                <span className="depth-scale__tick-mark" />
+                {tick % 1000 === 0 && (
+                  <span className="depth-scale__tick-label">
+                    {tick === 0 ? '0' : `${tick / 1000}k`}
+                  </span>
+                )}
+              </div>
             ))}
+            <div
+              className="depth-scale__pointer"
+              style={{ top: `${Math.min(telemetry.depth / 6000, 1) * 100}%` }}
+            >
+              <span className="depth-scale__pointer-line" />
+              <span className="depth-scale__pointer-dot" />
+            </div>
           </div>
         </div>
       </aside>
@@ -524,8 +418,8 @@ export default function LandingPage({ onEnterExplorer }: Props) {
             </p>
 
             <h1 className="hero-title hero-title--ref">
-              <span className="hero-title__line1">EXPLORE THE DEPTHS</span>
-              <span className="hero-title__line2">OF THE OCEAN</span>
+              <span className="hero-title__line1">EXPLORE THE OCEAN</span>
+              <span className="hero-title__line2">BEYOND THE SURFACE</span>
             </h1>
 
             <div className="hero-actions">
