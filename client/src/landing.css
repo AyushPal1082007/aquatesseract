@@ -263,6 +263,352 @@
   transform: translateY(-1px);
 }
 
+.fixed-obs-window {
+  position: fixed;
+  z-index: 80;
+  top: 88px;
+  bottom: 24px;
+  right: 36px;
+  width: 228px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 24px 20px;
+  transform: none;
+  border: 1px solid rgba(255, 255, 255, 0.54);
+  border-radius: 14px;
+  background: linear-gradient(155deg, rgba(223, 244, 251, 0.68), rgba(151, 203, 222, 0.52));
+  color: #06283d;
+  box-shadow: 0 20px 56px rgba(2, 20, 45, 0.28), inset 0 1px rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(24px) saturate(165%);
+  -webkit-backdrop-filter: blur(24px) saturate(165%);
+}
+
+.obs-header,
+.obs-live-tag,
+.obs-depth-val,
+.obs-trust-row,
+.obs-source-tag {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.obs-header {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.obs-live-tag {
+  justify-content: flex-start;
+}
+
+.obs-beacon,
+.obs-source-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #059669;
+}
+
+.obs-live-text,
+.obs-metric__label,
+.obs-trust-label {
+  color: rgba(4, 37, 61, 0.7);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+}
+
+.obs-zone-badge {
+  padding: 6px 9px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  white-space: nowrap;
+}
+
+.obs-depth-hero {
+  margin: 0;
+}
+
+.obs-depth-val {
+  justify-content: flex-start;
+  align-items: baseline;
+}
+
+.obs-depth-number {
+  font-family: var(--font-hero);
+  font-size: 48px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.obs-depth-unit {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.obs-depth-desc {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(4, 37, 61, 0.82);
+}
+
+.obs-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 17px;
+  padding: 20px 0;
+  border-top: 1px solid rgba(4, 37, 61, 0.18);
+  border-bottom: 1px solid rgba(4, 37, 61, 0.18);
+}
+
+.obs-metric {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.obs-metric__val {
+  font-family: var(--font-hero);
+  font-size: 21px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.obs-bar-track {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(4, 37, 61, 0.14);
+}
+
+.obs-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+}
+
+.obs-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 0;
+}
+
+.obs-trust-val {
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.obs-source-tag {
+  justify-content: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(4, 37, 61, 0.86);
+}
+
+.fixed-speedometer {
+  position: fixed;
+  z-index: 80;
+  top: 82px;
+  bottom: 18px;
+  left: 36px;
+  width: 88px;
+  color: var(--text-pure);
+}
+
+.fixed-obs-window,
+.fixed-speedometer {
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+
+.landing-root--surface .fixed-obs-window,
+.landing-root--surface .fixed-speedometer {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.depth-scale {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.depth-scale__track {
+  position: absolute;
+  inset: 8px 0;
+}
+
+.depth-scale__rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 64px;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(224, 242, 254, 0.48);
+  box-shadow: 0 0 12px rgba(125, 211, 252, 0.2);
+}
+
+.depth-scale__tick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  transform: translateY(-50%);
+}
+
+.depth-scale__tick:nth-child(2) {
+  transform: translateY(0);
+}
+
+.depth-scale__tick:nth-last-child(2) {
+  transform: translateY(-100%);
+}
+
+.depth-scale__tick-mark {
+  position: absolute;
+  left: 54px;
+  width: 8px;
+  height: 1px;
+  background: rgba(224, 242, 254, 0.58);
+}
+
+.depth-scale__tick--major .depth-scale__tick-mark {
+  width: 14px;
+  background: rgba(240, 249, 255, 0.88);
+}
+
+.depth-scale__tick-label {
+  position: absolute;
+  top: -7px;
+  left: 0;
+  width: 44px;
+  color: rgba(240, 249, 255, 0.9);
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 600;
+  text-align: right;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.75);
+}
+
+.depth-scale__pointer {
+  position: absolute;
+  left: 64px;
+  width: 22px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  transform: translateY(-50%);
+  transition: top 0.38s cubic-bezier(0.2, 0.8, 0.2, 1);
+  filter: drop-shadow(0 0 5px rgba(0, 229, 255, 0.8));
+}
+
+.depth-scale__pointer-line {
+  width: 20px;
+  height: 2px;
+  border-radius: 2px;
+  background: #67e8f9;
+}
+
+.depth-scale__pointer-dot {
+  position: absolute;
+  left: -6px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #ecfeff;
+  border-radius: 50%;
+  background: #06b6d4;
+  animation: depth-pointer-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes depth-pointer-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.48);
+    transform: scale(1);
+  }
+
+  50% {
+    box-shadow: 0 0 0 7px rgba(6, 182, 212, 0);
+    transform: scale(1.12);
+  }
+}
+
+.landing-nav {
+  top: 16px;
+  left: 24px;
+  right: 24px;
+  min-height: 60px;
+  padding: 10px 14px 10px 22px;
+  border: 1px solid rgba(224, 242, 254, 0.24);
+  border-radius: 12px;
+  box-shadow: 0 10px 32px rgba(0, 8, 20, 0.22), inset 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.landing-nav__brand {
+  font-size: 14px;
+  letter-spacing: 2px;
+}
+
+.landing-nav__right {
+  gap: 24px;
+}
+
+.landing-nav__links {
+  gap: 22px;
+}
+
+.landing-nav__links a {
+  font-size: 10px;
+  letter-spacing: 1.5px;
+}
+
+.nav-enter-btn {
+  padding: 10px 18px;
+  border-radius: 8px;
+  background: rgba(0, 229, 255, 0.14);
+  letter-spacing: 1.3px;
+}
+
+.nav-enter-btn:focus-visible,
+.landing-nav__links a:focus-visible {
+  outline: 2px solid #a5f3fc;
+  outline-offset: 3px;
+}
+
+@media (max-width: 1280px) {
+  .fixed-speedometer {
+    left: 18px;
+    width: 82px;
+  }
+
+  .fixed-obs-window {
+    right: 18px;
+    width: 220px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .fixed-speedometer,
+  .fixed-obs-window {
+    display: none;
+  }
+}
+
 /* ════════════════════════════════════════════════════════════════
    LEFT — VERTICAL HALF-PANEL DEPTH DIAL
    Pin starts at TOP (0 m) and travels DOWN the rail as you scroll
@@ -761,7 +1107,7 @@
 /* Headline matched directly to reference image — pure bright white */
 .hero-title--ref {
   font-family: var(--font-hero);
-  font-size: clamp(44px, 7.5vw, 112px);
+  font-size: clamp(28px, 5vw, 82px);
   font-weight: 900;
   line-height: 0.95;
   letter-spacing: -0.015em;
@@ -771,6 +1117,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  white-space: nowrap;
   text-shadow: 0 4px 20px rgba(0, 0, 0, 0.75),
     0 10px 45px rgba(0, 20, 60, 0.85),
     0 0 60px rgba(0, 180, 255, 0.35);
@@ -1022,6 +1369,7 @@
   letter-spacing: -0.015em;
   background: linear-gradient(180deg, #ffffff 0%, #7dd3fc 60%, #38bdf8 100%);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
   filter: drop-shadow(0 8px 40px rgba(0, 229, 255, 0.4));
   margin: 0;
@@ -1188,6 +1536,10 @@
     padding: 90px 18px 140px;
   }
 
+  .hero-title--ref {
+    font-size: clamp(26px, 7.3vw, 52px);
+  }
+
   .hero-pill-btn {
     padding: 12px 28px;
     font-size: 11px;
@@ -1203,6 +1555,10 @@
 @media (prefers-reduced-motion: reduce) {
   .particle {
     display: none;
+  }
+
+  .depth-scale__pointer-dot {
+    animation: none;
   }
 
   .scroll-dive-cue {
