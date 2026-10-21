@@ -4,7 +4,9 @@ import { config } from './config';
 import { dbReady, pool } from './db';
 import { HttpError } from './errors';
 import { readAt, readBlock } from './npy';
+import { createMlRouter } from './ml-routes';
 import { arr, listRuns, readJson, runDir } from './runs';
+import { dataSourceStatus, runInfo } from './ml-data';
 
 const Z90 = 1.645;
 const nn = (v: number) => (Number.isFinite(v) ? v : null);
@@ -18,6 +20,12 @@ function int(q: Request['query'], name: string, min: number, max: number): numbe
 
 const MAP_LAYERS = ['truth', 'prediction', 'uncertainty', 'error', 'observed', 'density'] as const;
 type MapLayer = (typeof MAP_LAYERS)[number];
+
+function requiredRunId(req: Request): string {
+  if (typeof req.query.run !== 'string')
+    throw new HttpError(400, 'bad_run', 'query param "run" missing or invalid');
+  return req.query.run;
+}
 
 function plane(dir: string, layer: MapLayer, yi: number | null, di: number): Float64Array {
   const lead = (a: { shape: number[] }) => (a.shape.length === 4 ? [yi as number, di] : [di]);
@@ -35,7 +43,11 @@ function oceanPlane(dir: string, di: number): Float64Array {
 }
 
 function mapResponse(req: Request, layer: MapLayer) {
-  const dir = runDir(req.query.run);
+  const run = requiredRunId(req);
+  const dir = runDir(run);
+  const info = runInfo(run);
+  if (layer === 'uncertainty' && !info.uncertaintyAvailable)
+    throw new HttpError(422, 'uncertainty_unavailable', 'Uncertainty unavailable for this baseline.');
   const meta = readJson(dir, 'metadata.json');
   const years: number[] = meta.years;
   const year = int(req.query, 'year', years[0], years[years.length - 1]);
@@ -56,7 +68,7 @@ function mapResponse(req: Request, layer: MapLayer) {
       if (Number.isFinite(v)) { if (v < min) min = v; if (v > max) max = v; }
       out.push(nn(v));
     }
-  return { run: req.query.run, layer, year, depth_idx: di, depth_m: meta.depth_labels_m[di], shape: [rows, cols],
+  return { run, layer, year, depth_idx: di, depth_m: meta.depth_labels_m[di], shape: [rows, cols],
     stride, min: nn(min), max: nn(max), oxygen_units: meta.oxygen_units, simulation_caveat: true, values: out };
 }
 
@@ -70,20 +82,36 @@ function cellCheck(req: Request, dir: string, nd: number, nlat: number, nlon: nu
 export function createApp() {
   const app = express();
   app.use(cors({ origin: config.corsOrigin }));
+  app.use('/ml', createMlRouter());
 
-  app.get('/health', (_q, res) => res.json({ status: 'ok', db: dbReady, runs: listRuns().length, results_dir: config.resultsDir }));
+  app.get('/health', (_q, res) => res.json({
+    status: 'ok', db: dbReady, runs: listRuns().length, dataSourceStatus: dataSourceStatus(),
+  }));
 
   app.get('/runs', (_q, res) => res.json({ runs: listRuns() }));
 
   app.get('/metadata', (req, res) => {
-    const dir = runDir(req.query.run);
+    const run = requiredRunId(req);
+    const dir = runDir(run);
+    const info = runInfo(run);
     const grid = arr(dir, 'truth')!.shape;
     res.json({ ...readJson(dir, 'metadata.json'), config: readJson(dir, 'config.json'), array_order: ['year', 'depth', 'lat', 'lon'],
-      shape: grid, layers: [...MAP_LAYERS], simulation_caveat: true,
+      shape: grid, layers: MAP_LAYERS.filter((layer) => layer !== 'uncertainty' || info.uncertaintyAvailable), simulation_caveat: true,
+      uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
       caveats: ['Simulation is not the real ocean.', 'Predictions are not new measurements.', 'Real data defines the sampling pattern.', 'Precomputed results, not live inference.'] });
   });
 
-  app.get('/metrics', (req, res) => res.json(readJson(runDir(req.query.run), 'metrics.json')));
+  app.get('/metrics', (req, res) => {
+    const run = requiredRunId(req);
+    const metrics = readJson(runDir(run), 'metrics.json');
+    const info = runInfo(run);
+    res.json({
+      ...metrics,
+      uncertainty: info.uncertaintyAvailable ? metrics.uncertainty ?? null : null,
+      uncertainty_available: info.uncertaintyAvailable,
+      uncertainty_reason: info.uncertaintyReason,
+    });
+  });
 
   app.get('/comparison', async (_q, res, next) => {
     try {
@@ -94,10 +122,14 @@ export function createApp() {
     }
     for (const run of listRuns()) {
       const dir = runDir(run);
+      const info = runInfo(run);
       const cfg = readJson(dir, 'config.json'), m = readJson(dir, 'metrics.json');
       rows.push({ source: cfg.source ?? 'hybrid', run, dataset: cfg.dataset, split: cfg.split, model: cfg.model, feature_set: cfg.feature_set, seed: cfg.seed,
         rmse: m.never_observed?.rmse ?? null, mae: m.never_observed?.mae ?? null, r2: m.never_observed?.r2 ?? null,
-        rmse_all: m.all?.rmse ?? null, rmse_observed: m.observed?.rmse ?? null, coverage90: m.uncertainty?.coverage90 ?? null, scope: 'never-observed cells, shared evaluator' });
+        rmse_all: m.all?.rmse ?? null, rmse_observed: m.observed?.rmse ?? null,
+        coverage90: info.uncertaintyAvailable ? m.uncertainty?.coverage90 ?? null : null,
+        uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
+        scope: 'never-observed cells, shared evaluator' });
     }
     res.json({ note: 'published / reproduced / hybrid rows are separate sources. Do not mix.', rows });
     } catch (e) { next(e); }
@@ -115,31 +147,45 @@ export function createApp() {
   });
 
   app.get('/timeseries', (req, res) => {
-    const dir = runDir(req.query.run);
+    const run = requiredRunId(req);
+    const dir = runDir(run);
+    const info = runInfo(run);
     const meta = readJson(dir, 'metadata.json');
     const [ny, nd, nlat, nlon] = arr(dir, 'truth')!.shape;
     const di = int(req.query, 'depth', 0, nd - 1);
     const { lat, lon, bad } = cellCheck(req, dir, nd, nlat, nlon);
     if (bad(di)) throw new HttpError(422, 'land_cell', `cell (depth ${di}, lat ${lat}, lon ${lon}) is land or below seafloor`);
-    const t = arr(dir, 'truth')!, p = arr(dir, 'prediction')!, s = arr(dir, 'uncertainty')!, o = arr(dir, 'observed')!;
+    const t = arr(dir, 'truth')!, p = arr(dir, 'prediction')!, o = arr(dir, 'observed')!;
+    const s = info.uncertaintyAvailable ? arr(dir, 'uncertainty') : null;
     const rd = (a: typeof t) => Array.from({ length: ny }, (_, y) => readAt(a, [y, di, lat, lon]));
-    const truth = rd(t), pred = rd(p), std = rd(s), obs = rd(o);
+    const truth = rd(t), pred = rd(p), std = s ? rd(s) : null, obs = rd(o);
     res.json({ years: meta.years, depth_idx: di, depth_m: meta.depth_labels_m[di], lat, lon, truth: truth.map(nn), prediction: pred.map(nn),
-      lower90: pred.map((v, i) => nn(v - Z90 * std[i])), upper90: pred.map((v, i) => nn(v + Z90 * std[i])), observed: obs.map((v) => v === 1), simulation_caveat: true });
+      lower90: std ? pred.map((v, i) => nn(v - Z90 * std[i])) : null,
+      upper90: std ? pred.map((v, i) => nn(v + Z90 * std[i])) : null,
+      uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
+      observed: obs.map((v) => v === 1), simulation_caveat: true });
   });
 
   app.get('/profile', (req, res) => {
-    const dir = runDir(req.query.run);
+    const run = requiredRunId(req);
+    const dir = runDir(run);
+    const info = runInfo(run);
     const meta = readJson(dir, 'metadata.json');
     const [, nd, nlat, nlon] = arr(dir, 'truth')!.shape;
     const year = int(req.query, 'year', meta.years[0], meta.years[meta.years.length - 1]);
     const yi = meta.years.indexOf(year);
     const { lat, lon, bad } = cellCheck(req, dir, nd, nlat, nlon);
-    const t = arr(dir, 'truth')!, p = arr(dir, 'prediction')!, s = arr(dir, 'uncertainty')!, o = arr(dir, 'observed')!;
+    const t = arr(dir, 'truth')!, p = arr(dir, 'prediction')!, o = arr(dir, 'observed')!;
+    const s = info.uncertaintyAvailable ? arr(dir, 'uncertainty') : null;
     const valid = Array.from({ length: nd }, (_, d) => !bad(d));
     if (!valid.some(Boolean)) throw new HttpError(422, 'land_cell', `column (lat ${lat}, lon ${lon}) is land`);
     const col = (a: typeof t) => Array.from({ length: nd }, (_, d) => (valid[d] ? readAt(a, [yi, d, lat, lon]) : NaN));
-    res.json({ year, lat, lon, depth_m: meta.depth_labels_m, truth: col(t).map(nn), prediction: col(p).map(nn), std: col(s).map(nn), observed: col(o).map((v) => (Number.isNaN(v) ? null : v === 1)), simulation_caveat: true });
+    res.json({
+      year, lat, lon, depth_m: meta.depth_labels_m, truth: col(t).map(nn), prediction: col(p).map(nn),
+      std: s ? col(s).map(nn) : null, uncertainty_available: info.uncertaintyAvailable,
+      uncertainty_reason: info.uncertaintyReason,
+      observed: col(o).map((v) => (Number.isNaN(v) ? null : v === 1)), simulation_caveat: true,
+    });
   });
 
   app.get('/physics-audit', (req, res) => {
