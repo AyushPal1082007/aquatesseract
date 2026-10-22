@@ -11,7 +11,6 @@ import {
   resolvePoint,
 } from './mockAdapter.js';
 import {
-  DEMO_NOTICE,
   GlobeFrame,
   LAYERS,
   LayerId,
@@ -99,6 +98,7 @@ export default function GlobeDashboard() {
   const [year, setYear] = useState(0);
   const [depthIdx, setDepthIdx] = useState(0);
   const [opacity, setOpacity] = useState(0.4);
+  const opacityRef = useRef(opacity);
   const [speed, setSpeed] = useState(1);
   const [autoRotate, setAutoRotate] = useState(true);
   const [sel, setSel] = useState<Sel>(null);
@@ -292,11 +292,13 @@ export default function GlobeDashboard() {
   useEffect(() => {
     if (!frame || !sceneRef.current) return;
     try {
-      sceneRef.current.setFrame(frame, opacity);
+      sceneRef.current.setFrame(frame);
+      sceneRef.current.setOpacity(opacityRef.current);
     } catch (reason) {
       setSceneError(reason instanceof Error ? reason.message : 'ML texture rendering failed.');
     }
-  }, [frame, opacity]);
+  }, [frame]);
+  useEffect(() => { opacityRef.current = opacity; sceneRef.current?.setOpacity(opacity); }, [opacity]);
   useEffect(() => { sceneRef.current?.setAutoRotate(autoRotate); }, [autoRotate]);
   useEffect(() => { sceneRef.current?.setSpeed(speed); }, [speed]);
   useEffect(() => { sceneRef.current?.setSelected(sel?.lat ?? null, sel?.lon ?? null); }, [sel]);
@@ -349,6 +351,9 @@ export default function GlobeDashboard() {
   const observedCount = frame?.cells.filter((cell) => cell.ocean && cell.observed).length ?? 0;
   const oceanCellCount = frame?.cells.filter((cell) => cell.ocean).length ?? 0;
   const plotUnit = frame?.units ?? 'model units';
+  const errorExtent = frame ? Math.max(Math.abs(frame.min), Math.abs(frame.max)) : 0;
+  const scaleLowLabel = layer === 'error' ? 'Under-prediction' : layer === 'uncertainty' ? 'Lower uncertainty' : 'Lower oxygen';
+  const scaleHighLabel = layer === 'error' ? 'Over-prediction' : layer === 'uncertainty' ? 'Higher uncertainty' : 'Higher oxygen';
   const profilePrediction = profile ? displayValues(profile.prediction) : [];
   const profileTruth = profile ? displayValues(profile.truth) : [];
   const profileUncertainty = profile?.uncertainty ? displayValues(profile.uncertainty) : null;
@@ -359,7 +364,6 @@ export default function GlobeDashboard() {
     <div className="gd-root">
       <div className="gd-notices">
         <p className="gd-notice gd-notice--sim">⚠ {SIMULATION_NOTICE}</p>
-        {run?.mock && <p className="gd-notice gd-notice--demo">● {DEMO_NOTICE}</p>}
       </div>
 
       <header className="gd-header">
@@ -375,7 +379,7 @@ export default function GlobeDashboard() {
         <div className="gd-status">
           <a className="gd-nav-link" href="#/explorer">← Back to Explorer</a>
           <span className="gd-badge gd-badge--src">{run ? `${run.dataset} · ${run.split}` : 'ML API'}</span>
-          <span className={`gd-badge ${run?.mock ? 'gd-badge--demo' : ''}`}>{run?.mock ? 'MOCK FIXTURE' : 'READ-ONLY ML'}</span>
+          <span className="gd-badge">READ-ONLY ML</span>
         </div>
       </header>
 
@@ -390,7 +394,13 @@ export default function GlobeDashboard() {
           {sceneError && <div className="gd-globe-fallback"><strong>3D globe unavailable</strong><span>{sceneError}</span><small>Enable WebGL / hardware acceleration, then reload.</small></div>}
           {frame && <>
             <div className="gd-layerlabel"><span className="gd-layerlabel__name">{layerInfo.label}</span><span className="gd-layerlabel__meta">{plotUnit} · stride {frame.downsampleStride}</span></div>
-            <div className="gd-legend"><div className="gd-legend__bar" /><div className="gd-legend__ends"><span>{frame.min.toFixed(2)}</span><span>{frame.max.toFixed(2)}</span></div></div>
+            <div className={`gd-legend gd-legend--${layer}`}>
+              {layer === 'observations' ? <div className="gd-legend__observed"><i /> Observed locations</div> : <>
+                <div className="gd-legend__bar" style={layer === 'error' ? { background: 'linear-gradient(90deg,#6f9bb4,#e5e9df 50%,#d58164)' } : undefined} />
+                <div className="gd-legend__ends"><span>{layer === 'error' ? `−${errorExtent.toFixed(3)}` : frame.min.toFixed(3)}</span><span>{layer === 'error' ? '0 · no error' : 'value'}</span><span>{layer === 'error' ? `+${errorExtent.toFixed(3)}` : frame.max.toFixed(3)}</span></div>
+                <div className="gd-legend__meaning"><span>{scaleLowLabel}</span><span>{scaleHighLabel}</span></div>
+              </>}
+            </div>
           </>}
           {selectedCell && <div className="gd-selchip"><i /> {sel!.lat.toFixed(1)}°, {sel!.lon.toFixed(1)}° · {selectedCell.observed ? 'observed cell' : 'never-observed simulated cell'}</div>}
         </div>
@@ -407,7 +417,7 @@ export default function GlobeDashboard() {
           <label className="gd-field"><span>Data layer</span><select value={layer} onChange={(event) => setLayer(event.target.value as LayerId)}>{LAYERS.filter((item) => availableLayers.includes(item.id)).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>{layer === 'uncertainty' && !run?.hasUncertainty && <em className="gd-warn">Uncertainty is unavailable for this baseline.</em>}</label>
           <label className="gd-field"><span>Year <b>{year || '—'}</b></span><select value={year} onChange={(event) => setYear(Number(event.target.value))}>{years.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
           <label className="gd-field"><span>Depth <b>{depthM} m</b></span><input type="range" min={0} max={Math.max(depths.length - 1, 0)} step={1} value={depthIdx} onChange={(event) => setDepthIdx(Number(event.target.value))} /></label>
-          <label className="gd-field"><span>Layer opacity <b>{Math.round(opacity * 100)}%</b></span><input type="range" min={0.05} max={1} step={0.01} value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label>
+          <label className="gd-field"><span>Data overlay opacity <b>{Math.round(opacity * 100)}%</b></span><input type="range" min={0.05} max={1} step={0.01} value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label>
           <label className="gd-field"><span>Animation speed <b>{speed.toFixed(1)}×</b></span><input type="range" min={0.2} max={3} step={0.1} value={speed} onChange={(event) => setSpeed(Number(event.target.value))} /></label>
           <div className="gd-toggles"><button className={`gd-toggle ${autoRotate ? 'gd-toggle--on' : ''}`} onClick={() => setAutoRotate((value) => !value)}>AUTO-ROTATE {autoRotate ? 'ON' : 'OFF'}</button><button className="gd-toggle" onClick={resetView}>RESET VIEW</button></div>
           <div className="gd-panel__foot"><p>Orbit: drag · Zoom: scroll</p><p>Click a glowing point to inspect ML values</p></div>
@@ -426,14 +436,14 @@ export default function GlobeDashboard() {
           <button className="gd-drawer__tab" onClick={() => setDrawerOpen((value) => !value)}><span>ANALYSIS</span><i className={`gd-chevron ${drawerOpen ? 'gd-chevron--up' : ''}`} /></button>
           <div className="gd-drawer__body">
             {!sel || !profile ? <p className="gd-drawer__empty">Select a point on the globe or search a coordinate to load its ML analysis.</p> : <>
-              <div className="gd-drawer__head"><h3>Point {profile.lat.toFixed(1)}°, {profile.lon.toFixed(1)}°</h3><span className="gd-tag">{selectedCell?.observed ? 'observed cell' : 'never-observed simulated cell'}</span><span className="gd-tag gd-tag--model">{run?.label}</span>{run?.mock && <span className="gd-tag gd-tag--mock">mock fixture</span>}</div>
+              <div className="gd-drawer__head"><h3>Point {profile.lat.toFixed(1)}°, {profile.lon.toFixed(1)}°</h3><span className="gd-tag">{selectedCell?.observed ? 'observed cell' : 'never-observed simulated cell'}</span><span className="gd-tag gd-tag--model">{run?.label}</span></div>
               <div className="gd-drawer__grid">
                 <Chart title="Depth profile" unit={plotUnit} series={[{ label: 'ML reconstruction', color: '#00e5ff', values: profilePrediction }, { label: 'simulation reference', color: '#9ca3af', values: profileTruth, dashed: true }]} band={profileUncertainty ? { label: 'model-estimated ±90%', upper: profilePrediction.map((value, index) => value + 1.645 * profileUncertainty[index]), lower: profilePrediction.map((value, index) => value - 1.645 * profileUncertainty[index]) } : undefined} />
                 <Chart title={`Time series @ ${depthM} m`} unit={plotUnit} series={[{ label: 'ML reconstruction', color: '#38bdf8', values: timeSeries }]} />
                 <Chart title="Reconstruction error" unit={plotUnit} series={[{ label: '|pred − reference|', color: '#f59e0b', values: errorSeries }]} />
                 <Chart title="Model-estimated uncertainty" unit={plotUnit} series={profileUncertainty ? [{ label: '±σ', color: '#c084fc', values: profileUncertainty }] : [{ label: 'unavailable — baseline run', color: '#475569', values: profilePrediction.map(() => 0), dashed: true }]} />
               </div>
-              <div className="gd-provenance"><h4>Provenance</h4><ul><li><b>Dataset:</b> {run?.dataset} · simulation-backed</li><li><b>Model:</b> {run?.model} · seed {run?.seed ?? 'not recorded'}</li><li><b>Source:</b> {run?.source} · {run?.mock ? 'mock fixture' : 'read-only artifact'}</li><li><b>Uncertainty:</b> {run?.hasUncertainty ? 'model-provided' : 'unavailable for this baseline'}</li><li><b>Caveat:</b> precomputed simulation output, not live real-ocean measurements.</li></ul></div>
+              <div className="gd-provenance"><h4>Provenance</h4><ul><li><b>Dataset:</b> {run?.dataset} · simulation-backed</li><li><b>Model:</b> {run?.model} · seed {run?.seed ?? 'not recorded'}</li><li><b>Source:</b> {run?.source} · precomputed run artifact</li><li><b>Uncertainty:</b> {run?.hasUncertainty ? 'model-provided' : 'unavailable for this baseline'}</li><li><b>Caveat:</b> precomputed simulation output, not live real-ocean measurements.</li></ul></div>
             </>}
           </div>
         </section>

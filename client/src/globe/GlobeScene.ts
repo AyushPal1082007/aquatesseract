@@ -18,7 +18,8 @@ export interface GlobeSceneOptions {
 }
 
 export interface GlobeSceneHandle {
-  setFrame(frame: GlobeFrame, opacity: number): void;
+  setFrame(frame: GlobeFrame): void;
+  setOpacity(opacity: number): void;
   setAutoRotate(on: boolean): void;
   setSpeed(mult: number): void;
   setSelected(lat: number | null, lon: number | null): void;
@@ -52,6 +53,19 @@ function oxyColor(t: number, out: THREE.Color): THREE.Color {
   return out;
 }
 
+function errorColor(t: number, out: THREE.Color): THREE.Color {
+  const f = Math.min(1, Math.max(0, t));
+  const low = [111, 155, 180], neutral = [229, 233, 223], high = [213, 129, 100];
+  const a = f < .5 ? low : neutral, b = f < .5 ? neutral : high;
+  const mix = f < .5 ? f * 2 : (f - .5) * 2;
+  out.setRGB(
+    (a[0] + (b[0] - a[0]) * mix) / 255,
+    (a[1] + (b[1] - a[1]) * mix) / 255,
+    (a[2] + (b[2] - a[2]) * mix) / 255,
+  );
+  return out;
+}
+
 const ATLAS_W = 1024, ATLAS_H = 512;
 
 function atlasPosition(lat: number, lon: number) {
@@ -75,7 +89,12 @@ function buildFieldTexture(frame: GlobeFrame): THREE.CanvasTexture {
   const color = new THREE.Color();
   for (const cell of validCells) {
     const position = atlasPosition(cell.lat, cell.lon);
-    oxyColor((cell.value - frame.min) / span, color);
+    if (frame.layer === 'error') {
+      const extent = Math.max(Math.abs(frame.min), Math.abs(frame.max)) || 1;
+      errorColor(.5 + cell.value / (2 * extent), color);
+    } else {
+      oxyColor((cell.value - frame.min) / span, color);
+    }
     ctx.fillStyle = `rgba(${Math.round(color.r * 255)},${Math.round(color.g * 255)},${Math.round(color.b * 255)},0.82)`;
     ctx.fillRect(position.x - cellWidth / 2, position.y - cellHeight / 2, cellWidth + 1, cellHeight + 1);
   }
@@ -90,7 +109,7 @@ function buildObservationTexture(frame: GlobeFrame): THREE.CanvasTexture {
   cv.width = ATLAS_W;
   cv.height = ATLAS_H;
   const ctx = cv.getContext('2d')!;
-  ctx.fillStyle = 'rgba(232, 95, 61, 0.92)';
+  ctx.fillStyle = 'rgba(199, 131, 92, 0.92)';
   for (const cell of frame.cells) {
     if (!cell.observed || !cell.ocean) continue;
     const { x, y } = atlasPosition(cell.lat, cell.lon);
@@ -327,7 +346,7 @@ export function createGlobeScene(opts: GlobeSceneOptions): GlobeSceneHandle {
 
   /* ---------- API ---------- */
   const handle: GlobeSceneHandle = {
-    setFrame(frame, opacity) {
+    setFrame(frame) {
       // swap field texture
       fieldTexHolder.tex?.dispose();
       const info = LAYERS.find((l) => l.id === (frame.layer as LayerId));
@@ -336,19 +355,14 @@ export function createGlobeScene(opts: GlobeSceneOptions): GlobeSceneHandle {
           ? buildObservationTexture(frame)
           : buildFieldTexture(frame);
         (fieldMat as THREE.MeshBasicMaterial & { map: THREE.Texture | null }).map = fieldTexHolder.tex;
-        fieldMat.opacity = opacity;
         fieldMat.visible = true;
         fieldMat.needsUpdate = true;
       } else {
         fieldMat.visible = false;
       }
-      // The same slider cross-fades the satellite map out as the data layer
-      // becomes stronger. At 100%, only modeled data (and the tiny flecks) remain.
-      sphereMat.transparent = opacity > 0;
-      sphereMat.opacity = 1 - opacity;
-      sphereMat.depthWrite = false;
-      sphereMat.needsUpdate = true;
+      // Opacity controls only the data overlay. Keep the Earth texture fully visible.
     },
+    setOpacity(opacity) { fieldMat.opacity = opacity; },
     setAutoRotate(on) { autoRotate = on; },
     setSpeed(m) { speedMult = m; },
     setSelected(lat, lon) {
