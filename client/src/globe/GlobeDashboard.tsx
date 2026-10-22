@@ -203,7 +203,10 @@ export default function GlobeDashboard() {
   }, [run, metadata, sel, year, depthM]);
 
   useEffect(() => {
-    if (!canvasRef.current) return;
+    // On a cold restart the first render is the loading screen, so the
+    // canvas does not exist yet. Re-run once the real dashboard is mounted.
+    if (loading || !canvasRef.current) return;
+    setSceneError('');
     try {
       const handle = createGlobeScene({
         canvas: canvasRef.current,
@@ -217,7 +220,7 @@ export default function GlobeDashboard() {
       setSceneError(reason instanceof Error ? reason.message : 'WebGL could not initialize.');
       return undefined;
     }
-  }, []);
+  }, [loading, runs.length]);
 
   useEffect(() => {
     if (!sceneError) return;
