@@ -1,7 +1,6 @@
 /* ================================================================
    GLOBE DASHBOARD — shared types
-   Mirrors the conventions of src/api.ts so the mock adapter can be
-   swapped for the real /api backend without touching the UI.
+   Mirrors the conventions of src/api.ts for the run adapter and dashboard.
    ================================================================ */
 
 export type ModelKind =
@@ -19,7 +18,7 @@ export interface RunSpec {
   hasUncertainty: boolean;
 }
 
-export type LayerId = 'prediction' | 'truth' | 'error' | 'uncertainty' | 'observations';
+export type LayerId = 'reconstruction' | 'reference' | 'error' | 'uncertainty' | 'observations';
 
 export interface LayerInfo {
   id: LayerId;
@@ -28,8 +27,8 @@ export interface LayerInfo {
 }
 
 export const LAYERS: LayerInfo[] = [
-  { id: 'prediction',  label: 'Hybrid reconstruction',            units: 'mL/L' },
-  { id: 'truth',       label: 'Simulation reference field',       units: 'mL/L' },
+  { id: 'reconstruction', label: 'Hybrid reconstruction',          units: 'mL/L' },
+  { id: 'reference',      label: 'Simulation reference field',     units: 'mL/L' },
   { id: 'error',       label: 'Reconstruction error',             units: 'mL/L' },
   { id: 'uncertainty', label: 'Model-estimated uncertainty',      units: 'mL/L' },
   { id: 'observations',label: 'Sparse simulated observations',    units: null },
@@ -75,5 +74,3 @@ export const SIMULATION_NOTICE =
   'Data source: OceanVerse CESM2-OMIP1 simulation. These are simulation-based dissolved-oxygen ' +
   'reconstructions, not live real-ocean measurements. Real-ocean accuracy has not yet been established.';
 
-export const DEMO_NOTICE =
-  'Demo mode — mock data. Verified CESM2-OMIP1 artifacts are not connected.';
