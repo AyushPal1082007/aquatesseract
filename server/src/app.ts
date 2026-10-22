@@ -3,8 +3,11 @@ import express, { NextFunction, Request, Response } from 'express';
 import { config } from './config';
 import { dbReady, pool } from './db';
 import { HttpError } from './errors';
+import { readAt, readBlock } from './npy';
+import { createMlRouter } from './ml-routes';
 import { Npy, readAt, readBlock } from './npy';
 import { arr, listRuns, readJson, runDir } from './runs';
+import { dataSourceStatus, runInfo } from './ml-data';
 
 const Z90 = 1.645;
 const nn = (v: number) => (Number.isFinite(v) ? v : null);
@@ -19,6 +22,10 @@ function int(q: Request['query'], name: string, min: number, max: number): numbe
 const MAP_LAYERS = ['truth', 'prediction', 'uncertainty', 'error', 'observed', 'density'] as const;
 type MapLayer = (typeof MAP_LAYERS)[number];
 
+function requiredRunId(req: Request): string {
+  if (typeof req.query.run !== 'string')
+    throw new HttpError(400, 'bad_run', 'query param "run" missing or invalid');
+  return req.query.run;
 function coordinateAxes(meta: { lat?: unknown; lon?: unknown }, nlat: number, nlon: number) {
   const axis = (values: unknown, length: number): number[] | null =>
     Array.isArray(values) && values.length === length && values.every((v) => typeof v === 'number' && Number.isFinite(v)) ? values : null;
@@ -41,7 +48,11 @@ function oceanPlane(dir: string, di: number): Float64Array {
 }
 
 function mapResponse(req: Request, layer: MapLayer) {
-  const dir = runDir(req.query.run);
+  const run = requiredRunId(req);
+  const dir = runDir(run);
+  const info = runInfo(run);
+  if (layer === 'uncertainty' && !info.uncertaintyAvailable)
+    throw new HttpError(422, 'uncertainty_unavailable', 'Uncertainty unavailable for this baseline.');
   const meta = readJson(dir, 'metadata.json');
   const years: number[] = meta.years;
   const year = int(req.query, 'year', years[0], years[years.length - 1]);
@@ -80,14 +91,36 @@ function cellCheck(req: Request, dir: string, nd: number, nlat: number, nlon: nu
 export function createApp() {
   const app = express();
   app.use(cors({ origin: config.corsOrigin }));
+  app.use('/ml', createMlRouter());
 
-  app.get('/health', (_q, res) => res.json({ status: 'ok', db: dbReady, runs: listRuns().length, results_dir: config.resultsDir }));
+  app.get('/health', (_q, res) => res.json({
+    status: 'ok', db: dbReady, runs: listRuns().length, dataSourceStatus: dataSourceStatus(),
+  }));
 
   app.get('/runs', (_q, res) => res.json({ runs: listRuns() }));
 
   app.get('/metadata', (req, res) => {
-    const dir = runDir(req.query.run);
+    const run = requiredRunId(req);
+    const dir = runDir(run);
+    const info = runInfo(run);
     const grid = arr(dir, 'truth')!.shape;
+    res.json({ ...readJson(dir, 'metadata.json'), config: readJson(dir, 'config.json'), array_order: ['year', 'depth', 'lat', 'lon'],
+      shape: grid, layers: MAP_LAYERS.filter((layer) => layer !== 'uncertainty' || info.uncertaintyAvailable), simulation_caveat: true,
+      uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
+      caveats: ['Simulation is not the real ocean.', 'Predictions are not new measurements.', 'Real data defines the sampling pattern.', 'Precomputed results, not live inference.'] });
+  });
+
+  app.get('/metrics', (req, res) => {
+    const run = requiredRunId(req);
+    const metrics = readJson(runDir(run), 'metrics.json');
+    const info = runInfo(run);
+    res.json({
+      ...metrics,
+      uncertainty: info.uncertaintyAvailable ? metrics.uncertainty ?? null : null,
+      uncertainty_available: info.uncertaintyAvailable,
+      uncertainty_reason: info.uncertaintyReason,
+    });
+  });
     const metrics = readJson(dir, 'metrics.json');
     const metadata = readJson(dir, 'metadata.json');
     const config = readJson(dir, 'config.json');
@@ -144,9 +177,14 @@ export function createApp() {
     }
     for (const run of listRuns()) {
       const dir = runDir(run);
+      const info = runInfo(run);
       const cfg = readJson(dir, 'config.json'), m = readJson(dir, 'metrics.json');
       rows.push({ source: cfg.source ?? 'hybrid', run, dataset: cfg.dataset, split: cfg.split, model: cfg.model, feature_set: cfg.feature_set, seed: cfg.seed,
         rmse: m.never_observed?.rmse ?? null, mae: m.never_observed?.mae ?? null, r2: m.never_observed?.r2 ?? null,
+        rmse_all: m.all?.rmse ?? null, rmse_observed: m.observed?.rmse ?? null,
+        coverage90: info.uncertaintyAvailable ? m.uncertainty?.coverage90 ?? null : null,
+        uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
+        scope: 'never-observed cells, shared evaluator' });
         valid_cells: m.never_observed?.n ?? null, rmse_all: m.all?.rmse ?? null, rmse_observed: m.observed?.rmse ?? null, coverage90: m.uncertainty?.coverage90 ?? null, scope: 'never-observed cells, shared evaluator' });
     }
     res.json({ note: 'published / reproduced / hybrid rows are separate sources. Do not mix.', rows });
@@ -165,7 +203,9 @@ export function createApp() {
   });
 
   app.get('/timeseries', (req, res) => {
-    const dir = runDir(req.query.run);
+    const run = requiredRunId(req);
+    const dir = runDir(run);
+    const info = runInfo(run);
     const meta = readJson(dir, 'metadata.json');
     const [ny, nd, nlat, nlon] = arr(dir, 'truth')!.shape;
     const di = int(req.query, 'depth', 0, nd - 1);
@@ -180,7 +220,9 @@ export function createApp() {
   });
 
   app.get('/profile', (req, res) => {
-    const dir = runDir(req.query.run);
+    const run = requiredRunId(req);
+    const dir = runDir(run);
+    const info = runInfo(run);
     const meta = readJson(dir, 'metadata.json');
     const [, nd, nlat, nlon] = arr(dir, 'truth')!.shape;
     const year = int(req.query, 'year', meta.years[0], meta.years[meta.years.length - 1]);
