@@ -85,7 +85,10 @@ export interface GridPoint {
   status: 'observed' | 'never_observed' | 'invalid' | 'land';
 }
 
-const PROD_RUN_NAMES = Object.keys(VERIFIED_RUNS);
+const PROD_RUN_NAMES = [
+  'CESM2_omip1_spatial_hybrid_full_seed1',
+  'CESM2_omip1_spatial_lstm_full_seed1',
+];
 const coordinateCache = new Map<string, Coordinates>();
 const metadataCache = new Map<string, RunMetadata>();
 const configCache = new Map<string, RunConfiguration>();
@@ -103,7 +106,7 @@ function cachedMetadata(dir: string): RunMetadata {
   const cached = metadataCache.get(dir);
   if (cached) return cached;
   const raw = readJson(dir, 'metadata.json');
-  if (!Array.isArray(raw.years) || raw.years.length === 0 || raw.years.some((year) => !Number.isInteger(year)))
+  if (!Array.isArray(raw.years) || raw.years.length === 0 || raw.years.some((year: unknown) => !Number.isInteger(year)))
     throw new HttpError(503, 'run_metadata_invalid', 'Run metadata must contain supported integer years.');
   const metadata = raw as RunMetadata;
   metadataCache.set(dir, metadata);
@@ -124,16 +127,19 @@ function assertRunShapes(run: string, dir: string) {
   const shape = prediction.shape;
   const truth = arr(dir, 'truth')!;
   const observed = arr(dir, 'observed')!;
-  const uncertainty = arr(dir, 'uncertainty')!;
+  const uncertainty = arr(dir, 'uncertainty', false);
   const ocean = arr(dir, 'ocean')!;
   if (truth.shape.join(',') !== shape.join(',') || observed.shape.join(',') !== shape.join(',') ||
-      uncertainty.shape.join(',') !== shape.join(',') || ocean.shape.join(',') !== shape.slice(1).join(','))
+    (uncertainty && uncertainty.shape.join(',') !== shape.join(',')) || ocean.shape.join(',') !== shape.slice(1).join(','))
     throw new HttpError(503, 'artifact_shape_mismatch', 'Run arrays do not match the documented data contract dimensions.');
-  if (prediction.dtype !== '<f4' || truth.dtype !== '<f4' || uncertainty.dtype !== '<f4' ||
-      observed.dtype !== '|u1' || ocean.dtype !== '|u1')
+  if (prediction.dtype !== '<f4' || truth.dtype !== '<f4' || (uncertainty && uncertainty.dtype !== '<f4') ||
+    observed.dtype !== '|u1' || ocean.dtype !== '|u1')
     throw new HttpError(503, 'artifact_dtype_mismatch', 'Run arrays do not match the documented float32/uint8 data types.');
+  const definition = VERIFIED_RUNS[run];
+  if (definition?.uncertaintyAvailable && !uncertainty)
+    throw new HttpError(503, 'array_missing', 'This registered run declares uncertainty but pred_std.npy is missing.');
   if (!run.startsWith('MOCK_') && process.env.AQUATESSERACT_ALLOW_SYNTHETIC_FIXTURES !== '1' &&
-      (shape.length !== 4 || shape[0] !== 62 || shape[1] !== 33 || shape[2] !== 180 || shape[3] !== 360))
+    (shape.length !== 4 || shape[0] !== 62 || shape[1] !== 33 || shape[2] !== 180 || shape[3] !== 360))
     throw new HttpError(503, 'artifact_shape_mismatch', 'Production run dimensions must be (62, 33, 180, 360).');
   validatedRunShapes.add(dir);
 }
@@ -252,7 +258,7 @@ export function getCoordinates(run: string): Coordinates {
   if (run.startsWith('MOCK_')) {
     const mock = cachedMetadata(dir);
     if (mock.mock !== true || mock.latitude_convention !== 'TO_VERIFY (mock: index0 = -87.5, south to north)' ||
-        mock.longitude_convention !== 'TO_VERIFY (mock: index0 = 2.5E, 0..360)')
+      mock.longitude_convention !== 'TO_VERIFY (mock: index0 = 2.5E, 0..360)')
       throw new HttpError(503, 'coordinate_metadata_invalid', 'Mock coordinate fixture is missing its explicit mock convention markers.');
     const coordinates = parseCoordinateMetadata({
       ...mock,
@@ -267,7 +273,7 @@ export function getCoordinates(run: string): Coordinates {
     coordinateCache.set(cacheKey, coordinates);
     const shape = arr(dir, 'prediction')!.shape;
     if (coordinates.latitudeValues.length !== shape[2] || coordinates.longitudeValues.length !== shape[3] ||
-        coordinates.depthValuesM.length !== shape[1])
+      coordinates.depthValuesM.length !== shape[1])
       throw new HttpError(503, 'coordinate_shape_mismatch', 'Mock coordinate metadata dimensions do not match the run arrays.');
     return coordinates;
   }
@@ -294,7 +300,7 @@ export function getCoordinates(run: string): Coordinates {
   assertRunShapes(run, dir);
   const shape = arr(dir, 'prediction')!.shape;
   if (coordinates.latitudeValues.length !== shape[2] || coordinates.longitudeValues.length !== shape[3] ||
-      coordinates.depthValuesM.length !== shape[1])
+    coordinates.depthValuesM.length !== shape[1])
     throw new HttpError(503, 'coordinate_shape_mismatch', 'Coordinate metadata dimensions do not match the run arrays.');
   coordinateCache.set(cacheKey, coordinates);
   return coordinates;
@@ -307,6 +313,10 @@ export function runInfo(run: string): RunInfo {
   const seed = cfg.seed ?? metadata.seed;
   const isMock = metadata.mock === true || run.startsWith('MOCK_');
   const verified = VERIFIED_RUNS[run as keyof typeof VERIFIED_RUNS];
+  const hasUncertaintyArtifact = Boolean(arr(dir, 'uncertainty', false));
+  const uncertaintyAvailable = isMock
+    ? false
+    : verified?.uncertaintyAvailable ?? hasUncertaintyArtifact;
   return {
     runId: run,
     dataset: String(cfg.dataset ?? metadata.dataset ?? 'unknown'),
@@ -315,10 +325,10 @@ export function runInfo(run: string): RunInfo {
     seed: typeof seed === 'number' && Number.isInteger(seed) ? seed : null,
     source: String(cfg.source ?? (isMock ? 'mock' : 'verified')),
     mock: isMock,
-    uncertaintyAvailable: verified?.uncertaintyAvailable ?? false,
-    uncertaintyReason: verified?.uncertaintyAvailable === false
-      ? 'Uncertainty unavailable for this baseline'
-      : isMock ? 'Mock fixture uncertainty is not verified.' : null,
+    uncertaintyAvailable,
+    uncertaintyReason: isMock
+      ? 'Mock fixture uncertainty is not verified.'
+      : uncertaintyAvailable ? null : 'Uncertainty unavailable for this baseline',
   };
 }
 
@@ -329,17 +339,16 @@ export function dataSourceStatus(): DataSourceStatus {
   if (!hasProduction) return hasMock ? 'mock' : 'unavailable';
   if (!PROD_RUN_NAMES.every((id) => runs.includes(id))) return 'unavailable';
   if (!config.coordinateMetadataFile || !fs.existsSync(config.coordinateMetadataFile)) return 'unavailable';
-  if (!config.comparisonFile || !fs.existsSync(config.comparisonFile)) return 'unavailable';
   try {
     const coordinates = parseCoordinateMetadata(readCoordinateFile(config.coordinateMetadataFile));
     if (coordinates.latitudeValues.length !== 180 || coordinates.longitudeValues.length !== 360 ||
-        coordinates.depthValuesM.length !== 33) return 'unavailable';
+      coordinates.depthValuesM.length !== 33) return 'unavailable';
     for (const id of PROD_RUN_NAMES) {
       const dir = runDir(id);
       assertRunShapes(id, dir);
       const shape = arr(dir, 'prediction')!.shape;
       if (coordinates.latitudeValues.length !== shape[2] || coordinates.longitudeValues.length !== shape[3] ||
-          coordinates.depthValuesM.length !== shape[1]) return 'unavailable';
+        coordinates.depthValuesM.length !== shape[1]) return 'unavailable';
     }
     return 'verified';
   } catch (error) {
@@ -515,7 +524,15 @@ export function getSlice(run: string, year: number, depthM: number, layer: Slice
   const shift = coords.longitudeShiftCells;
   const total = nlat * nlon;
   const stride = Math.max(1, Math.ceil(Math.sqrt(total / maxPoints)));
-  const points: Array<{ latitude: number; longitude: number; latitudeIndex: number; longitudeIndex: number; value: number | null }> = [];
+  const points: Array<{
+    latitude: number;
+    longitude: number;
+    latitudeIndex: number;
+    longitudeIndex: number;
+    value: number | null;
+    observed: boolean;
+    ocean: boolean;
+  }> = [];
   for (let lat = 0; lat < nlat; lat += stride) {
     for (let lon = 0; lon < nlon; lon += stride) {
       const li = lat * nlon + artifactLongitudeIndex(lon, nlon, shift);
@@ -528,12 +545,18 @@ export function getSlice(run: string, year: number, depthM: number, layer: Slice
         if (layer === 'observations' && obs[li] !== 0 && Number.isFinite(truth[li])) value = truth[li];
         if (layer === 'uncertainty' && std && Number.isFinite(std[li]) && std[li] > 0) value = std[li];
       }
-      points.push({ latitude: coords.latitudeValues[lat], longitude: coords.longitudeValues[lon], latitudeIndex: lat, longitudeIndex: lon, value });
+      points.push({
+        latitude: coords.latitudeValues[lat], longitude: coords.longitudeValues[lon],
+        latitudeIndex: lat, longitudeIndex: lon, value,
+        observed: obs[li] !== 0, ocean: ocean[li] !== 0,
+      });
     }
   }
   return {
     run: runInfo(run), year, depthM: d.value, layer, points: points.slice(0, maxPoints),
-    downsampleStride: stride, exact: false, provenance: provenance(run, year, d.value),
+    downsampleStride: stride, exact: false,
+    oxygenUnits: layer === 'observations' ? 'binary sampling mask' : meta.oxygen_units ?? 'unknown',
+    provenance: provenance(run, year, d.value),
   };
 }
 
@@ -741,4 +764,3 @@ export function getGraphNodeData(run: string, year: number, x: number, y: number
     profile,
   };
 }
-

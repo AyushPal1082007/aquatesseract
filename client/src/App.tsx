@@ -50,13 +50,27 @@ export default function App() {
   }, [run, meta, layer, year, depth]);
 
   return (
-    <>
+    <div className="explorer-page">
+      <header className="explorer-topbar">
+        <a className="explorer-brand" href="#/">AQUA<span>TESSERACT</span></a>
+        <div className="explorer-nav">
+          <a href="#/">Landing</a>
+          <a className="explorer-nav__globe" href="#/globe">Open 3D Globe <span>↗</span></a>
+        </div>
+      </header>
       <div className="banner">
         ⚠ Evaluated on a <b>simulated</b> ocean (OceanVerse digital twin). Predictions are not new measurements.
         Precomputed results, not live inference.
       </div>
       <main>
-        <h1>AquaTesseract · Reconstruction Explorer</h1>
+        <section className="explorer-hero">
+          <div>
+            <p className="explorer-kicker">OCEANVERSE // READ-ONLY MODEL LAB</p>
+            <h1>Reconstruction Explorer</h1>
+            <p>Inspect the actual OceanVerse model artifacts, then move into the 3D globe to explore the same run spatially.</p>
+          </div>
+          <a className="explorer-hero__cta" href="#/globe">Launch Globe Dashboard <span>→</span></a>
+        </section>
         {err && <p className="err">{err}</p>}
         {!runs.length && !err && <p>No runs found. Run <code>make mock</code>.</p>}
         {meta && (
@@ -75,7 +89,7 @@ export default function App() {
             </label>
           </section>
         )}
-        {map && <MapCanvas data={map} />}
+        {map && <section className="explorer-map-card"><div className="explorer-map-card__head"><span>ML FIELD // {map.layer}</span><span>{map.oxygen_units}</span></div><MapCanvas data={map} /></section>}
         {map && <p className="legend">{map.layer}: {map.min?.toFixed(3)} → {map.max?.toFixed(3)} · units: {map.oxygen_units}</p>}
         <h2>Model comparison</h2>
         <table>
@@ -90,6 +104,6 @@ export default function App() {
           </tbody>
         </table>
       </main>
-    </>
+    </div>
   );
 }

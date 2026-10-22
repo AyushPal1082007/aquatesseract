@@ -14,6 +14,7 @@ export interface GlobeSceneOptions {
   canvas: HTMLCanvasElement;
   onPick: (lat: number, lon: number) => void;
   onFrame?: () => void;
+  onError?: (message: string) => void;
 }
 
 export interface GlobeSceneHandle {
@@ -52,61 +53,32 @@ function oxyColor(t: number, out: THREE.Color): THREE.Color {
 }
 
 const ATLAS_W = 1024, ATLAS_H = 512;
-const GRID_ROWS = 17, GRID_COLS = 36;
+
+function atlasPosition(lat: number, lon: number) {
+  const normalizedLon = ((lon % 360) + 360) % 360;
+  return {
+    x: (normalizedLon / 360) * ATLAS_W,
+    y: ((90 - lat) / 180) * ATLAS_H,
+  };
+}
 
 function buildFieldTexture(frame: GlobeFrame): THREE.CanvasTexture {
   const cv = document.createElement('canvas');
   cv.width = ATLAS_W; cv.height = ATLAS_H;
   const ctx = cv.getContext('2d')!;
-  const values = new Float32Array(GRID_ROWS * GRID_COLS);
-  const valid = new Uint8Array(GRID_ROWS * GRID_COLS);
-  for (const cell of frame.cells) {
-    if (!Number.isFinite(cell.value)) continue;
-    const row = Math.round((cell.lat + 80) / 10);
-    const col = ((Math.round((cell.lon + 180) / 10) % GRID_COLS) + GRID_COLS) % GRID_COLS;
-    if (row < 0 || row >= GRID_ROWS) continue;
-    const index = row * GRID_COLS + col;
-    values[index] = cell.value;
-    valid[index] = 1;
-  }
-
-  // The demo samples are spaced 10° apart. Interpolate them into a smooth
-  // texture and fade coverage beside missing (land) cells instead of drawing
-  // opaque square tiles.
-  const pixels = ctx.createImageData(ATLAS_W, ATLAS_H);
+  const validCells = frame.cells.filter((cell) => cell.ocean && Number.isFinite(cell.value));
+  const latitudeCount = new Set(validCells.map((cell) => cell.lat)).size;
+  const longitudeCount = new Set(validCells.map((cell) => cell.lon)).size;
+  const cellWidth = Math.max(1, Math.ceil(ATLAS_W / Math.max(longitudeCount, 1)));
+  const cellHeight = Math.max(1, Math.ceil(ATLAS_H / Math.max(latitudeCount, 1)));
   const span = frame.max - frame.min || 1;
   const color = new THREE.Color();
-  for (let y = 0; y < ATLAS_H; y++) {
-    const lat = 90 - ((y + 0.5) / ATLAS_H) * 180;
-    const gridY = (lat + 80) / 10;
-    if (gridY < 0 || gridY > GRID_ROWS - 1) continue;
-    const row0 = Math.floor(gridY), row1 = Math.min(GRID_ROWS - 1, row0 + 1);
-    const fy = gridY - row0;
-    for (let x = 0; x < ATLAS_W; x++) {
-      const lon = ((x + 0.5) / ATLAS_W) * 360 - 180;
-      const gridX = (lon + 180) / 10;
-      const col0 = Math.floor(gridX) % GRID_COLS;
-      const col1 = (col0 + 1) % GRID_COLS;
-      const fx = gridX - Math.floor(gridX);
-      let weightedValue = 0, coverage = 0;
-      let index = row0 * GRID_COLS + col0, weight = (1 - fx) * (1 - fy);
-      if (valid[index]) { weightedValue += values[index] * weight; coverage += weight; }
-      index = row0 * GRID_COLS + col1; weight = fx * (1 - fy);
-      if (valid[index]) { weightedValue += values[index] * weight; coverage += weight; }
-      index = row1 * GRID_COLS + col0; weight = (1 - fx) * fy;
-      if (valid[index]) { weightedValue += values[index] * weight; coverage += weight; }
-      index = row1 * GRID_COLS + col1; weight = fx * fy;
-      if (valid[index]) { weightedValue += values[index] * weight; coverage += weight; }
-      if (!coverage) continue;
-      oxyColor((weightedValue / coverage - frame.min) / span, color);
-      const offset = (y * ATLAS_W + x) * 4;
-      pixels.data[offset] = Math.round(color.r * 255);
-      pixels.data[offset + 1] = Math.round(color.g * 255);
-      pixels.data[offset + 2] = Math.round(color.b * 255);
-      pixels.data[offset + 3] = Math.round(coverage * 255);
-    }
+  for (const cell of validCells) {
+    const position = atlasPosition(cell.lat, cell.lon);
+    oxyColor((cell.value - frame.min) / span, color);
+    ctx.fillStyle = `rgba(${Math.round(color.r * 255)},${Math.round(color.g * 255)},${Math.round(color.b * 255)},0.82)`;
+    ctx.fillRect(position.x - cellWidth / 2, position.y - cellHeight / 2, cellWidth + 1, cellHeight + 1);
   }
-  ctx.putImageData(pixels, 0, 0);
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
@@ -120,9 +92,8 @@ function buildObservationTexture(frame: GlobeFrame): THREE.CanvasTexture {
   const ctx = cv.getContext('2d')!;
   ctx.fillStyle = 'rgba(232, 95, 61, 0.92)';
   for (const cell of frame.cells) {
-    if (!cell.observed) continue;
-    const x = ((cell.lon + 180) / 360) * ATLAS_W;
-    const y = ((90 - cell.lat) / 180) * ATLAS_H;
+    if (!cell.observed || !cell.ocean) continue;
+    const { x, y } = atlasPosition(cell.lat, cell.lon);
     ctx.beginPath();
     ctx.arc(x, y, 3.2, 0, Math.PI * 2);
     ctx.fill();
@@ -150,6 +121,11 @@ export function createGlobeScene(opts: GlobeSceneOptions): GlobeSceneHandle {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  const contextLost = (event: Event) => {
+    event.preventDefault();
+    opts.onError?.('WebGL context was lost after initialization.');
+  };
+  canvas.addEventListener('webglcontextlost', contextLost, false);
 
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
@@ -327,21 +303,25 @@ export function createGlobeScene(opts: GlobeSceneOptions): GlobeSceneHandle {
   const tick = (now: number) => {
     if (disposed) return;
     raf = requestAnimationFrame(tick);
-    const t = (now - t0) / 1000;
-    if (autoRotate && !drag) rotY += 0.0016 * speedMult * 60 / 60; // steady spin
-    globe.rotation.y = rotY;
-    globe.rotation.x = rotX;
-    moveCrystals(t);
-    arcs.rotation.z = t * 0.02;
-    // idle marker pulse
-    const pulse = 1 + 0.14 * Math.sin(t * 3.2);
-    selRing.scale.setScalar(pulse);
-    // camera dolly
-    camDist += (targetDist - camDist) * 0.08;
-    camera.position.set(0, camDist * 0.18, camDist);
-    camera.lookAt(0, 0, 0);
-    renderer.render(scene, camera);
-    opts.onFrame?.();
+    try {
+      const t = (now - t0) / 1000;
+      if (autoRotate && !drag) rotY += 0.0016 * speedMult; // steady spin
+      globe.rotation.y = rotY;
+      globe.rotation.x = rotX;
+      moveCrystals(t);
+      arcs.rotation.z = t * 0.02;
+      const pulse = 1 + 0.14 * Math.sin(t * 3.2);
+      selRing.scale.setScalar(pulse);
+      camDist += (targetDist - camDist) * 0.08;
+      camera.position.set(0, camDist * 0.18, camDist);
+      camera.lookAt(0, 0, 0);
+      renderer.render(scene, camera);
+      opts.onFrame?.();
+    } catch (error) {
+      disposed = true;
+      cancelAnimationFrame(raf);
+      opts.onError?.(error instanceof Error ? error.message : 'Three.js render failed.');
+    }
   };
   raf = requestAnimationFrame(tick);
 
@@ -395,6 +375,7 @@ export function createGlobeScene(opts: GlobeSceneOptions): GlobeSceneHandle {
       canvas.removeEventListener('pointercancel', up);
       canvas.removeEventListener('wheel', wheel);
       canvas.removeEventListener('click', click);
+      canvas.removeEventListener('webglcontextlost', contextLost);
       fieldTexHolder.tex?.dispose();
       baseTex.dispose();
       sphereMat.dispose();

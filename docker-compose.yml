@@ -34,6 +34,7 @@ services:
     depends_on: [server]
     environment:
       VITE_API_PROXY: http://server:4000
+    command: sh -c "npm install --package-lock=false --prefer-offline --no-audit --no-fund && npm run dev"
     ports: ["${CLIENT_PORT:-5173}:5173"]
     volumes:
       - ./client:/app

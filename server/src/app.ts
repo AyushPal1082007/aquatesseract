@@ -3,252 +3,361 @@ import express, { NextFunction, Request, Response } from 'express';
 import { config } from './config';
 import { dbReady, pool } from './db';
 import { HttpError } from './errors';
-import { readAt, readBlock } from './npy';
 import { createMlRouter } from './ml-routes';
+import {
+  dataSourceStatus,
+  getCoordinates,
+  mapPointToGrid,
+  runInfo,
+} from './ml-data';
 import { Npy, readAt, readBlock } from './npy';
 import { arr, listRuns, readJson, runDir } from './runs';
-import { dataSourceStatus, runInfo } from './ml-data';
 
 const Z90 = 1.645;
-const nn = (v: number) => (Number.isFinite(v) ? v : null);
-
-function int(q: Request['query'], name: string, min: number, max: number): number {
-  const v = Number(q[name]);
-  if (q[name] === undefined || !Number.isInteger(v) || v < min || v > max)
-    throw new HttpError(400, 'bad_param', `"${name}" must be an integer in [${min}, ${max}]`);
-  return v;
-}
-
 const MAP_LAYERS = ['truth', 'prediction', 'uncertainty', 'error', 'observed', 'density'] as const;
 type MapLayer = (typeof MAP_LAYERS)[number];
 
-function requiredRunId(req: Request): string {
-  if (typeof req.query.run !== 'string')
-    throw new HttpError(400, 'bad_run', 'query param "run" missing or invalid');
-  return req.query.run;
-function coordinateAxes(meta: { lat?: unknown; lon?: unknown }, nlat: number, nlon: number) {
+const CAVEATS = [
+  'Simulation is not the real ocean.',
+  'Predictions are not new measurements.',
+  'Real data defines the sampling pattern.',
+  'Precomputed results, not live inference.',
+];
+
+const nullable = (value: number): number | null => Number.isFinite(value) ? value : null;
+
+function queryText(req: Request, name: string): string | undefined {
+  return typeof req.query[name] === 'string' ? req.query[name] : undefined;
+}
+
+function requiredRun(req: Request): string {
+  const run = queryText(req, 'run') ?? queryText(req, 'runId');
+  if (!run) throw new HttpError(400, 'bad_run', 'Query parameter "run" is missing or invalid.');
+  return run;
+}
+
+function integerQuery(req: Request, name: string, min: number, max: number): number {
+  const raw = queryText(req, name);
+  const value = raw === undefined ? NaN : Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max)
+    throw new HttpError(400, 'bad_param', `"${name}" must be an integer in [${min}, ${max}].`);
+  return value;
+}
+
+function coordinateAxes(meta: Record<string, any>, nlat: number, nlon: number) {
   const axis = (values: unknown, length: number): number[] | null =>
-    Array.isArray(values) && values.length === length && values.every((v) => typeof v === 'number' && Number.isFinite(v)) ? values : null;
+    Array.isArray(values) && values.length === length &&
+      values.every((value) => typeof value === 'number' && Number.isFinite(value))
+      ? values
+      : null;
   return { latitudes: axis(meta.lat, nlat), longitudes: axis(meta.lon, nlon) };
 }
 
-function plane(dir: string, layer: MapLayer, yi: number | null, di: number): Float64Array {
-  const lead = (a: { shape: number[] }) => (a.shape.length === 4 ? [yi as number, di] : [di]);
-  if (layer === 'error') {
-    const p = arr(dir, 'prediction')!, t = arr(dir, 'truth')!;
-    const a = readBlock(p, lead(p)), b = readBlock(t, lead(t));
-    return a.map((v, i) => Math.abs(v - b[i]));
-  }
-  const a = arr(dir, layer as 'truth' | 'prediction' | 'uncertainty' | 'observed' | 'density')!;
-  return readBlock(a, lead(a));
+function yearAndDepth(req: Request, metadata: Record<string, any>) {
+  const years = metadata.years as number[];
+  const depths = metadata.depth_labels_m as number[];
+  if (!Array.isArray(years) || !years.length || !Array.isArray(depths) || !depths.length)
+    throw new HttpError(503, 'run_metadata_invalid', 'Run metadata is missing years or depth labels.');
+  const year = integerQuery(req, 'year', years[0], years[years.length - 1]);
+  const yearIndex = years.indexOf(year);
+  if (yearIndex < 0) throw new HttpError(400, 'bad_param', `Year ${year} is not supported by this run.`);
+  const depth = integerQuery(req, 'depth', 0, depths.length - 1);
+  return { years, depths, year, yearIndex, depth };
 }
 
-function oceanPlane(dir: string, di: number): Float64Array {
-  return readBlock(arr(dir, 'ocean')!, [di]);
+function plane(dir: string, layer: MapLayer, yearIndex: number, depthIndex: number): Float64Array {
+  if (layer === 'error') {
+    const prediction = readBlock(arr(dir, 'prediction')!, [yearIndex, depthIndex]);
+    const truth = readBlock(arr(dir, 'truth')!, [yearIndex, depthIndex]);
+    return prediction.map((value, index) => Number.isFinite(value) && Number.isFinite(truth[index])
+      ? value - truth[index]
+      : NaN);
+  }
+  const key = layer === 'truth' || layer === 'prediction' || layer === 'uncertainty' ||
+    layer === 'observed' || layer === 'density' ? layer : 'prediction';
+  const source = arr(dir, key)!;
+  return readBlock(source, source.shape.length === 4 ? [yearIndex, depthIndex] : [depthIndex]);
 }
 
 function mapResponse(req: Request, layer: MapLayer) {
-  const run = requiredRunId(req);
+  const run = requiredRun(req);
   const dir = runDir(run);
   const info = runInfo(run);
   if (layer === 'uncertainty' && !info.uncertaintyAvailable)
     throw new HttpError(422, 'uncertainty_unavailable', 'Uncertainty unavailable for this baseline.');
-  const meta = readJson(dir, 'metadata.json');
-  const years: number[] = meta.years;
-  const year = int(req.query, 'year', years[0], years[years.length - 1]);
-  const yi = years.indexOf(year);
-  const di = int(req.query, 'depth', 0, meta.depth_labels_m.length - 1);
-  const stride = req.query.stride === undefined ? 1 : int(req.query, 'stride', 1, 16);
-  const ref = arr(dir, 'truth')!;
-  const [, , nlat, nlon] = ref.shape;
-  const { latitudes, longitudes } = coordinateAxes(meta, nlat, nlon);
-  const vals = plane(dir, layer, yi, di);
-  const ocean = oceanPlane(dir, di);
-  const out: (number | null)[] = [];
-  let min = Infinity, max = -Infinity;
-  const rows = Math.ceil(nlat / stride), cols = Math.ceil(nlon / stride);
-  for (let r = 0; r < nlat; r += stride)
-    for (let c = 0; c < nlon; c += stride) {
-      const k = r * nlon + c;
-      const v = ocean[k] === 0 ? NaN : vals[k];
-      if (Number.isFinite(v)) { if (v < min) min = v; if (v > max) max = v; }
-      out.push(nn(v));
+
+  const metadata = readJson(dir, 'metadata.json') as Record<string, any>;
+  const { depths, year, yearIndex, depth } = yearAndDepth(req, metadata);
+  const truth = arr(dir, 'truth')!;
+  const [, , nlat, nlon] = truth.shape;
+  const coordinates = getCoordinates(run);
+  const values = plane(dir, layer, yearIndex, depth);
+  const ocean = readBlock(arr(dir, 'ocean')!, [depth]);
+  const output: (number | null)[] = [];
+  let min = Infinity;
+  let max = -Infinity;
+  const stride = queryText(req, 'stride') === undefined ? 1 : integerQuery(req, 'stride', 1, 16);
+  const rows = Math.ceil(nlat / stride);
+  const cols = Math.ceil(nlon / stride);
+
+  for (let lat = 0; lat < nlat; lat += stride) {
+    for (let lon = 0; lon < nlon; lon += stride) {
+      const index = lat * nlon + lon;
+      const value = ocean[index] === 0 ? NaN : values[index];
+      if (Number.isFinite(value)) {
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+      }
+      output.push(nullable(value));
     }
-  return { run: req.query.run, layer, year, depth_idx: di, depth_m: meta.depth_labels_m[di], shape: [rows, cols],
-    stride, min: nn(min), max: nn(max), oxygen_units: layer === 'observed' ? 'binary sampling mask' : layer === 'density' ? 'fraction of observed cells' : meta.oxygen_units,
-    latitude_values: latitudes?.filter((_, i) => i % stride === 0) ?? null,
-    longitude_values: longitudes?.filter((_, i) => i % stride === 0) ?? null,
-    simulation_caveat: true, values: out };
+  }
+
+  const units = layer === 'observed'
+    ? 'binary sampling mask'
+    : layer === 'density'
+      ? 'fraction of observed cells'
+      : metadata.oxygen_units ?? 'unknown';
+
+  return {
+    run,
+    layer,
+    year,
+    depth_idx: depth,
+    depth_m: depths[depth],
+    shape: [rows, cols],
+    stride,
+    min: nullable(min),
+    max: nullable(max),
+    oxygen_units: units,
+    latitude_values: coordinates.latitudeValues.filter((_, index) => index % stride === 0),
+    longitude_values: coordinates.longitudeValues.filter((_, index) => index % stride === 0),
+    simulation_caveat: true,
+    values: output,
+  };
 }
 
-function cellCheck(req: Request, dir: string, nd: number, nlat: number, nlon: number) {
-  const lat = int(req.query, 'lat', 0, nlat - 1), lon = int(req.query, 'lon', 0, nlon - 1);
+function metricResponse(run: string): Record<string, any> {
+  const info = runInfo(run);
+  const metrics = readJson(runDir(run), 'metrics.json') as Record<string, any>;
+  return {
+    ...metrics,
+    uncertainty: info.uncertaintyAvailable ? metrics.uncertainty ?? null : null,
+    uncertainty_available: info.uncertaintyAvailable,
+    uncertainty_reason: info.uncertaintyReason,
+  };
+}
+
+function legacyMetadata(run: string) {
+  const dir = runDir(run);
+  const info = runInfo(run);
+  const metadata = readJson(dir, 'metadata.json') as Record<string, any>;
+  const configFile = readJson(dir, 'config.json') as Record<string, any>;
+  const shape = arr(dir, 'truth')!.shape;
+  const coordinates = getCoordinates(run);
+  const layers = MAP_LAYERS.filter((layer) =>
+    (layer !== 'uncertainty' || info.uncertaintyAvailable) &&
+    (layer !== 'density' || Boolean(arr(dir, 'density', false))),
+  );
+  return {
+    ...metadata,
+    config: configFile,
+    array_order: ['year', 'depth', 'lat', 'lon'],
+    shape,
+    layers,
+    coordinates_available: true,
+    lat: coordinates.latitudeValues,
+    lon: coordinates.longitudeValues,
+    uncertainty_available: info.uncertaintyAvailable,
+    uncertainty_reason: info.uncertaintyReason,
+    simulation_caveat: true,
+    caveats: CAVEATS,
+  };
+}
+
+function legacyLocate(req: Request) {
+  const run = requiredRun(req);
+  const dir = runDir(run);
+  const metadata = readJson(dir, 'metadata.json') as Record<string, any>;
+  const shape = arr(dir, 'truth')!.shape;
+  const [, depths, nlat, nlon] = shape;
+  const latitude = Number(queryText(req, 'latitude'));
+  const longitude = Number(queryText(req, 'longitude'));
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude))
+    throw new HttpError(400, 'bad_coordinate', 'latitude must be between -90 and 90 and longitude must be a valid number.');
+  const depth = integerQuery(req, 'depth', 0, depths - 1);
+  const coordinates = getCoordinates(run);
+  const grid = mapPointToGrid(run, latitude, longitude, metadata.years[0], coordinates.depthValuesM[depth]);
+  const ocean = readAt(arr(dir, 'ocean')!, [depth, grid.arrayIndices.latitudeIndex, grid.arrayIndices.longitudeIndex]) !== 0;
+  if (!ocean) throw new HttpError(422, 'land_cell', 'No valid ocean value exists at this location and depth.');
+  return {
+    requested: { latitude, longitude },
+    nearest: {
+      latitude: grid.grid.latitude,
+      longitude: grid.grid.longitude,
+      lat_idx: grid.grid.latitudeIndex,
+      lon_idx: grid.grid.longitudeIndex,
+    },
+    depth_idx: depth,
+  };
+}
+
+function legacyTimeSeries(req: Request) {
+  const run = requiredRun(req);
+  const dir = runDir(run);
+  const info = runInfo(run);
+  const metadata = readJson(dir, 'metadata.json') as Record<string, any>;
+  const truth = arr(dir, 'truth')!;
+  const [ny, nd, nlat, nlon] = truth.shape;
+  const depth = integerQuery(req, 'depth', 0, nd - 1);
+  const lat = integerQuery(req, 'lat', 0, nlat - 1);
+  const lon = integerQuery(req, 'lon', 0, nlon - 1);
   const ocean = arr(dir, 'ocean')!;
-  const bad = (di: number) => readAt(ocean, [di, lat, lon]) === 0;
-  return { lat, lon, bad, nd };
+  if (readAt(ocean, [depth, lat, lon]) === 0)
+    throw new HttpError(422, 'land_cell', `Cell (depth ${depth}, lat ${lat}, lon ${lon}) is land or below seafloor.`);
+  const prediction = arr(dir, 'prediction')!;
+  const std = info.uncertaintyAvailable ? arr(dir, 'uncertainty', false) : null;
+  const observed = arr(dir, 'observed')!;
+  const values = (source: Npy) => Array.from({ length: ny }, (_, yearIndex) =>
+    readAt(source, [yearIndex, depth, lat, lon]),
+  );
+  const truthValues = values(truth);
+  const predictionValues = values(prediction);
+  const stdValues = std ? values(std) : [];
+  return {
+    years: metadata.years,
+    depth_idx: depth,
+    depth_m: metadata.depth_labels_m[depth],
+    lat,
+    lon,
+    truth: truthValues.map(nullable),
+    prediction: predictionValues.map(nullable),
+    lower90: std ? predictionValues.map((value, index) => nullable(value - Z90 * stdValues[index])) : null,
+    upper90: std ? predictionValues.map((value, index) => nullable(value + Z90 * stdValues[index])) : null,
+    observed: values(observed).map((value) => value === 1),
+    uncertainty_available: Boolean(std),
+    simulation_caveat: true,
+  };
+}
+
+function legacyProfile(req: Request) {
+  const run = requiredRun(req);
+  const dir = runDir(run);
+  const info = runInfo(run);
+  const metadata = readJson(dir, 'metadata.json') as Record<string, any>;
+  const truth = arr(dir, 'truth')!;
+  const [, nd, nlat, nlon] = truth.shape;
+  const year = integerQuery(req, 'year', metadata.years[0], metadata.years[metadata.years.length - 1]);
+  const yearIndex = metadata.years.indexOf(year);
+  if (yearIndex < 0) throw new HttpError(400, 'bad_param', `Year ${year} is not supported by this run.`);
+  const lat = integerQuery(req, 'lat', 0, nlat - 1);
+  const lon = integerQuery(req, 'lon', 0, nlon - 1);
+  const ocean = arr(dir, 'ocean')!;
+  const valid = Array.from({ length: nd }, (_, depth) => readAt(ocean, [depth, lat, lon]) !== 0);
+  if (!valid.some(Boolean)) throw new HttpError(422, 'land_cell', `Column (lat ${lat}, lon ${lon}) is land.`);
+  const prediction = arr(dir, 'prediction')!;
+  const std = info.uncertaintyAvailable ? arr(dir, 'uncertainty', false) : null;
+  const observed = arr(dir, 'observed')!;
+  const column = (source: Npy) => Array.from({ length: nd }, (_, depth) =>
+    valid[depth] ? readAt(source, [yearIndex, depth, lat, lon]) : NaN,
+  );
+  const predictions = column(prediction);
+  const truths = column(truth);
+  return {
+    year,
+    lat,
+    lon,
+    depth_m: metadata.depth_labels_m,
+    truth: truths.map(nullable),
+    prediction: predictions.map(nullable),
+    std: std ? column(std).map(nullable) : null,
+    uncertainty_available: Boolean(std),
+    observed: column(observed).map((value) => Number.isNaN(value) ? null : value === 1),
+    simulation_caveat: true,
+  };
+}
+
+async function legacyComparison(res: Response, next: NextFunction) {
+  try {
+    const rows: Record<string, unknown>[] = [];
+    if (dbReady) {
+      const result = await pool.query('SELECT * FROM published_results ORDER BY dataset, rmse');
+      for (const row of result.rows) {
+        rows.push({
+          source: 'published', dataset: row.dataset, split: row.split, model: row.model,
+          feature_set: null, seed: null, rmse: row.rmse, r2: row.r2,
+          reference: row.reference, scope: 'as reported in paper',
+        });
+      }
+    }
+    for (const run of listRuns()) {
+      const dir = runDir(run);
+      const info = runInfo(run);
+      const runConfig = readJson(dir, 'config.json') as Record<string, any>;
+      const metrics = metricResponse(run);
+      rows.push({
+        source: runConfig.source ?? info.source,
+        run,
+        dataset: runConfig.dataset ?? info.dataset,
+        split: runConfig.split ?? info.split,
+        model: runConfig.model ?? info.model,
+        feature_set: runConfig.feature_set ?? null,
+        seed: runConfig.seed ?? info.seed,
+        rmse: metrics.never_observed?.rmse ?? null,
+        mae: metrics.never_observed?.mae ?? null,
+        r2: metrics.never_observed?.r2 ?? null,
+        valid_cells: metrics.never_observed?.n ?? null,
+        rmse_all: metrics.all?.rmse ?? null,
+        rmse_observed: metrics.observed?.rmse ?? null,
+        coverage90: info.uncertaintyAvailable ? metrics.uncertainty?.coverage90 ?? null : null,
+        uncertainty_available: info.uncertaintyAvailable,
+        uncertainty_reason: info.uncertaintyReason,
+        scope: 'never-observed cells, shared evaluator',
+      });
+    }
+    res.json({ note: 'Published and local rows are separate sources. Do not mix.', rows });
+  } catch (error) {
+    next(error);
+  }
 }
 
 export function createApp() {
   const app = express();
   app.use(cors({ origin: config.corsOrigin }));
+
+  // Canonical ML API. All new frontend data access goes through this router.
   app.use('/ml', createMlRouter());
 
-  app.get('/health', (_q, res) => res.json({
+  // Legacy read-only API retained for the existing map explorer and contract docs.
+  app.get('/health', (_req, res) => res.json({
     status: 'ok', db: dbReady, runs: listRuns().length, dataSourceStatus: dataSourceStatus(),
   }));
-
-  app.get('/runs', (_q, res) => res.json({ runs: listRuns() }));
-
-  app.get('/metadata', (req, res) => {
-    const run = requiredRunId(req);
-    const dir = runDir(run);
-    const info = runInfo(run);
-    const grid = arr(dir, 'truth')!.shape;
-    res.json({ ...readJson(dir, 'metadata.json'), config: readJson(dir, 'config.json'), array_order: ['year', 'depth', 'lat', 'lon'],
-      shape: grid, layers: MAP_LAYERS.filter((layer) => layer !== 'uncertainty' || info.uncertaintyAvailable), simulation_caveat: true,
-      uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
-      caveats: ['Simulation is not the real ocean.', 'Predictions are not new measurements.', 'Real data defines the sampling pattern.', 'Precomputed results, not live inference.'] });
-  });
-
-  app.get('/metrics', (req, res) => {
-    const run = requiredRunId(req);
-    const metrics = readJson(runDir(run), 'metrics.json');
-    const info = runInfo(run);
-    res.json({
-      ...metrics,
-      uncertainty: info.uncertaintyAvailable ? metrics.uncertainty ?? null : null,
-      uncertainty_available: info.uncertaintyAvailable,
-      uncertainty_reason: info.uncertaintyReason,
-    });
-  });
-    const metrics = readJson(dir, 'metrics.json');
-    const metadata = readJson(dir, 'metadata.json');
-    const config = readJson(dir, 'config.json');
-    const [, , nlat, nlon] = grid;
-    const axes = coordinateAxes(metadata, nlat, nlon);
-    const uncertaintyAvailable = Boolean(metrics.uncertainty && arr(dir, 'uncertainty', false));
-    const layers = MAP_LAYERS.filter((l) => (l !== 'uncertainty' || uncertaintyAvailable) && (l !== 'density' || arr(dir, 'density', false)));
-    res.json({ ...metadata, config, array_order: ['year', 'depth', 'lat', 'lon'],
-      shape: grid, uncertainty_available: uncertaintyAvailable, coordinates_available: Boolean(axes.latitudes && axes.longitudes), layers, contract_validated: Boolean(metadata.contract_validated || config.contract_validated), simulation_caveat: true,
-      caveats: ['Simulation is not the real ocean.', 'Predictions are not new measurements.', 'Real data defines the sampling pattern.', 'Precomputed results, not live inference.'] });
-  });
-
-  app.get('/locate', (req, res) => {
-    const dir = runDir(req.query.run);
-    const meta = readJson(dir, 'metadata.json');
-    const truth = arr(dir, 'truth')!;
-    const [, nd, nlat, nlon] = truth.shape;
-    const latitude = Number(req.query.latitude), longitude = Number(req.query.longitude);
-    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude))
-      throw new HttpError(400, 'bad_coordinate', 'latitude must be between -90 and 90 and longitude must be a valid number');
-    const depth = int(req.query, 'depth', 0, nd - 1);
-    const nearestValid = req.query.nearest !== 'false' && req.query.nearest !== '0';
-    const lonConvention = String(meta.longitude_convention ?? '').toLowerCase();
-    const { latitudes, longitudes } = coordinateAxes(meta, nlat, nlon);
-    if (!latitudes || !longitudes)
-      throw new HttpError(501, 'coordinates_unavailable', 'grid coordinate metadata is unavailable for this run');
-    const targetLon = (lonConvention.includes('180') && lonConvention.includes('-')) || Math.min(...longitudes) < 0
-      ? ((longitude + 180) % 360 + 360) % 360 - 180 : ((longitude % 360) + 360) % 360;
-    const ocean = readBlock(arr(dir, 'ocean')!, [depth]);
-    let best: { lat: number; lon: number; distance: number } | null = null;
-    for (let y = 0; y < nlat; y++) for (let x = 0; x < nlon; x++) {
-      if (nearestValid && ocean[y * nlon + x] === 0) continue;
-      const dLat = (latitudes[y] - latitude) * Math.PI / 180;
-      const rawLon = Math.abs(longitudes[x] - targetLon) % 360;
-      const dLon = Math.min(rawLon, 360 - rawLon) * Math.PI / 180;
-      const a = Math.sin(dLat / 2) ** 2 + Math.cos(latitude * Math.PI / 180) * Math.cos(latitudes[y] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-      const distance = 2 * Math.asin(Math.min(1, Math.sqrt(a)));
-      if (!best || distance < best.distance) best = { lat: y, lon: x, distance };
-    }
-    if (!best) throw new HttpError(422, 'no_ocean_cell', 'no valid ocean grid cell exists at this depth');
-    if (ocean[best.lat * nlon + best.lon] === 0)
-      throw new HttpError(422, 'land_cell', 'No valid ocean value exists at this location and depth. Try another coordinate or depth.');
-    res.json({ requested: { latitude, longitude }, nearest: { latitude: latitudes[best.lat], longitude: longitudes[best.lon], lat_idx: best.lat, lon_idx: best.lon }, depth_idx: depth });
-  });
-
-  app.get('/metrics', (req, res) => res.json(readJson(runDir(req.query.run), 'metrics.json')));
-
-  app.get('/comparison', async (_q, res, next) => {
-    try {
-    const rows: Record<string, unknown>[] = [];
-    if (dbReady) {
-      const { rows: pub } = await pool.query('SELECT * FROM published_results ORDER BY dataset, rmse');
-      for (const p of pub) rows.push({ source: 'published', dataset: p.dataset, split: p.split, model: p.model, feature_set: null, seed: null, rmse: p.rmse, r2: p.r2, reference: p.reference, scope: 'as reported in paper' });
-    }
-    for (const run of listRuns()) {
-      const dir = runDir(run);
-      const info = runInfo(run);
-      const cfg = readJson(dir, 'config.json'), m = readJson(dir, 'metrics.json');
-      rows.push({ source: cfg.source ?? 'hybrid', run, dataset: cfg.dataset, split: cfg.split, model: cfg.model, feature_set: cfg.feature_set, seed: cfg.seed,
-        rmse: m.never_observed?.rmse ?? null, mae: m.never_observed?.mae ?? null, r2: m.never_observed?.r2 ?? null,
-        rmse_all: m.all?.rmse ?? null, rmse_observed: m.observed?.rmse ?? null,
-        coverage90: info.uncertaintyAvailable ? m.uncertainty?.coverage90 ?? null : null,
-        uncertainty_available: info.uncertaintyAvailable, uncertainty_reason: info.uncertaintyReason,
-        scope: 'never-observed cells, shared evaluator' });
-        valid_cells: m.never_observed?.n ?? null, rmse_all: m.all?.rmse ?? null, rmse_observed: m.observed?.rmse ?? null, coverage90: m.uncertainty?.coverage90 ?? null, scope: 'never-observed cells, shared evaluator' });
-    }
-    res.json({ note: 'published / reproduced / hybrid rows are separate sources. Do not mix.', rows });
-    } catch (e) { next(e); }
-  });
-
+  app.get('/runs', (_req, res) => res.json({ runs: listRuns() }));
+  app.get('/metadata', (req, res) => res.json(legacyMetadata(requiredRun(req))));
+  app.get('/metrics', (req, res) => res.json(metricResponse(requiredRun(req))));
+  app.get('/comparison', (req, res, next) => void legacyComparison(res, next));
+  app.get('/locate', (req, res) => res.json(legacyLocate(req)));
   app.get('/map', (req, res) => {
-    const layer = req.query.layer as MapLayer;
-    if (!MAP_LAYERS.includes(layer)) throw new HttpError(400, 'bad_param', `"layer" must be one of ${MAP_LAYERS.join(', ')}`);
+    const layer = queryText(req, 'layer') as MapLayer | undefined;
+    if (!layer || !MAP_LAYERS.includes(layer))
+      throw new HttpError(400, 'bad_param', `"layer" must be one of ${MAP_LAYERS.join(', ')}.`);
     res.json(mapResponse(req, layer));
   });
-
-  app.get('/density', (req, res) => {
-    arr(runDir(req.query.run), 'density');
-    res.json(mapResponse(req, 'density'));
-  });
-
-  app.get('/timeseries', (req, res) => {
-    const run = requiredRunId(req);
-    const dir = runDir(run);
-    const info = runInfo(run);
-    const meta = readJson(dir, 'metadata.json');
-    const [ny, nd, nlat, nlon] = arr(dir, 'truth')!.shape;
-    const di = int(req.query, 'depth', 0, nd - 1);
-    const { lat, lon, bad } = cellCheck(req, dir, nd, nlat, nlon);
-    if (bad(di)) throw new HttpError(422, 'land_cell', `cell (depth ${di}, lat ${lat}, lon ${lon}) is land or below seafloor`);
-    const t = arr(dir, 'truth')!, p = arr(dir, 'prediction')!, s = arr(dir, 'uncertainty', false), o = arr(dir, 'observed')!;
-    const rd = (a: Npy) => Array.from({ length: ny }, (_, y) => readAt(a, [y, di, lat, lon]));
-    const truth = rd(t), pred = rd(p), std = s ? rd(s) : Array.from({ length: ny }, () => NaN), obs = rd(o);
-    res.json({ years: meta.years, depth_idx: di, depth_m: meta.depth_labels_m[di], lat, lon, truth: truth.map(nn), prediction: pred.map(nn),
-      lower90: pred.map((v, i) => s ? nn(v - Z90 * std[i]) : null), upper90: pred.map((v, i) => s ? nn(v + Z90 * std[i]) : null),
-      uncertainty_available: Boolean(s && readJson(dir, 'metrics.json').uncertainty), observed: obs.map((v) => v === 1), simulation_caveat: true });
-  });
-
-  app.get('/profile', (req, res) => {
-    const run = requiredRunId(req);
-    const dir = runDir(run);
-    const info = runInfo(run);
-    const meta = readJson(dir, 'metadata.json');
-    const [, nd, nlat, nlon] = arr(dir, 'truth')!.shape;
-    const year = int(req.query, 'year', meta.years[0], meta.years[meta.years.length - 1]);
-    const yi = meta.years.indexOf(year);
-    const { lat, lon, bad } = cellCheck(req, dir, nd, nlat, nlon);
-    const t = arr(dir, 'truth')!, p = arr(dir, 'prediction')!, s = arr(dir, 'uncertainty', false), o = arr(dir, 'observed')!;
-    const valid = Array.from({ length: nd }, (_, d) => !bad(d));
-    if (!valid.some(Boolean)) throw new HttpError(422, 'land_cell', `column (lat ${lat}, lon ${lon}) is land`);
-    const col = (a: Npy) => Array.from({ length: nd }, (_, d) => (valid[d] ? readAt(a, [yi, d, lat, lon]) : NaN));
-    res.json({ year, lat, lon, depth_m: meta.depth_labels_m, truth: col(t).map(nn), prediction: col(p).map(nn),
-      std: s ? col(s).map(nn) : Array.from({ length: nd }, () => null), uncertainty_available: Boolean(s && readJson(dir, 'metrics.json').uncertainty),
-      observed: col(o).map((v) => (Number.isNaN(v) ? null : v === 1)), simulation_caveat: true });
-  });
-
+  app.get('/density', (req, res) => res.json(mapResponse(req, 'density')));
+  app.get('/timeseries', (req, res) => res.json(legacyTimeSeries(req)));
+  app.get('/profile', (req, res) => res.json(legacyProfile(req)));
   app.get('/physics-audit', (req, res) => {
-    const dir = runDir(req.query.run);
-    if (!arr(dir, 'physics', false)) throw new HttpError(501, 'not_available', 'physics_audit.npy not produced for this run yet');
-    res.status(501).json({ error: { code: 'todo', message: 'wire once M3 defines physics_audit.npy layout' } });
+    const dir = runDir(requiredRun(req));
+    if (!arr(dir, 'physics', false)) throw new HttpError(501, 'not_available', 'physics_audit.npy is not available for this run.');
+    throw new HttpError(501, 'not_available', 'The physics audit layout is not yet defined.');
   });
 
-  app.use((_q, _r, next) => next(new HttpError(404, 'no_route', 'unknown endpoint')));
-  app.use((e: Error, _q: Request, res: Response, _n: NextFunction) => {
-    if (e instanceof HttpError) return res.status(e.status).json({ error: { code: e.code, message: e.message } });
-    if (e instanceof RangeError) return res.status(400).json({ error: { code: 'bad_index', message: e.message } });
-    console.error(e);
-    res.status(500).json({ error: { code: 'internal', message: 'internal error' } });
+  app.use((_req, _res, next) => next(new HttpError(404, 'no_route', 'Unknown endpoint.')));
+  app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
+    if (error instanceof HttpError) return res.status(error.status).json({ error: { code: error.code, message: error.message } });
+    if (error instanceof RangeError) return res.status(400).json({ error: { code: 'bad_index', message: error.message } });
+    console.error(error);
+    return res.status(500).json({ error: { code: 'internal', message: 'Internal error.' } });
   });
+
   return app;
 }
